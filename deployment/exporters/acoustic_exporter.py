@@ -362,9 +362,12 @@ class DiffSingerAcousticExporter(BaseExporter):
         diffusion, check = onnxsim.simplify(diffusion, include_subgraph=True)
         assert check, 'Simplified ONNX model could not be validated'
         onnx_helper.graph_fold_back_to_squeeze(diffusion.graph)
+        weight_pattern = r'diffusion\..*\.conditioner_projection\.weight'
+        if self.backbone_class_name == 'DiffusionTransformer':
+            weight_pattern = r'diffusion\..*\.(?:conditioner_projection|cond_proj)\.weight'
         onnx_helper.graph_extract_conditioner_projections(
             graph=diffusion.graph, op_type='Conv',
-            weight_pattern=r'diffusion\..*\.conditioner_projection\.weight',
+            weight_pattern=weight_pattern,
             alias_prefix='/diffusion/backbone/cache'
         )
         onnx_helper.graph_remove_unused_values(diffusion.graph)
