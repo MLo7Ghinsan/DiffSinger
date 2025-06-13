@@ -80,7 +80,7 @@ backbone_args:
   dropout: 0.1
   use_rope: true
   use_lynx: true
-  fusion_style: 'alternate'  # options: 'parallel', 'alternate', 'dit-only', 'lynx-only'
+  fusion_style: 'parallel'  # options: 'parallel', 'alternate', 'dit-only', 'lynx-only'
   
 #backbone_type: 'lynxnet'
 #backbone_args:
