@@ -688,9 +688,14 @@ class DiffSingerVarianceExporter(BaseExporter):
         pitch_predictor, check = onnxsim.simplify(pitch_predictor, include_subgraph=True)
         assert check, 'Simplified ONNX model could not be validated'
         onnx_helper.graph_fold_back_to_squeeze(pitch_predictor.graph)
+        weight_pattern = r'pitch_predictor\..*\.conditioner_projection\.weight'
+        if self.pitch_backbone_class_name == 'DiffusionTransformer':
+            weight_pattern = (
+                r'pitch_predictor\..*\.(?:conditioner_projection|cond_proj)\.weight'
+            )
         onnx_helper.graph_extract_conditioner_projections(
             graph=pitch_predictor.graph, op_type='Conv',
-            weight_pattern=r'pitch_predictor\..*\.conditioner_projection\.weight',
+            weight_pattern=weight_pattern,
             alias_prefix='/pitch_predictor/backbone/cache'
         )
         onnx_helper.graph_remove_unused_values(pitch_predictor.graph)
