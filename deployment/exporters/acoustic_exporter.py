@@ -13,6 +13,7 @@ from modules.fastspeech.param_adaptor import VARIANCE_CHECKLIST
 from utils import load_ckpt, onnx_helper, remove_suffix
 from utils.hparams import hparams
 from utils.phoneme_utils import load_phoneme_dictionary
+from modules.commons.rotary_embedding_torch import RotaryEmbedding
 
 
 class DiffSingerAcousticExporter(BaseExporter):
@@ -166,6 +167,9 @@ class DiffSingerAcousticExporter(BaseExporter):
 
     @torch.no_grad()
     def _torch_export_model(self):
+        for m in self.model.modules():
+            if isinstance(m, RotaryEmbedding):
+                m.cache_if_possible = False
         # Prepare inputs for FastSpeech2 and aux decoder tracing
         n_frames = 10
         tokens = torch.LongTensor([[1]]).to(self.device)
