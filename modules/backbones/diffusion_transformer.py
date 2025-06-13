@@ -134,7 +134,7 @@ class DiTLynxFusionBlock(nn.Module):
         self.lynx_block = LYNXNetResidualLayer(
             dim_cond=dim_cond,
             dim=dim,
-            expansion_factor=2.0,
+            expansion_factor=int(2.0),
             kernel_size=31,
             activation='PReLU',
             dropout=dropout
