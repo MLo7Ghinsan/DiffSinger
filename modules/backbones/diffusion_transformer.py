@@ -139,7 +139,6 @@ class DiffusionTransformer(nn.Module):
         x = self.input_projection(x)
         diffusion_step = self.diffusion_embedding(diffusion_step)
         diffusion_step = self.mlp(diffusion_step)
-        cond = cond.transpose(1, 2)
         for layer in self.layers:
             x = layer(x, cond, diffusion_step)
         x = self.layer_norm(x)
