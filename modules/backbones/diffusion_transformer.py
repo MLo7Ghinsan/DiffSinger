@@ -4,6 +4,7 @@ import torch.nn.functional as F
 
 from modules.commons.common_layers import SinusoidalPosEmb
 from modules.commons.rotary_embedding_torch import RotaryEmbedding, apply_rotary_emb
+from modules.backbones.lynxnet import LYNXNetResidualLayer
 from utils.hparams import hparams
 
 
@@ -72,14 +73,7 @@ class MultiHeadAttention(nn.Module):
 
 class DiTConVBlock(nn.Module):
     """Diffusion Transformer convolutional block with AdaLN conditioning."""
-    def __init__(
-        self,
-        dim: int,
-        dim_cond: int,
-        num_heads: int = 8,
-        dropout: float = 0.1,
-        use_rope: bool = False,
-    ):
+    def __init__(self, dim: int, dim_cond: int, num_heads: int = 8, dropout: float = 0.1, use_rope: bool = False):
         super().__init__()
         self.dim = dim
         self.norm1 = nn.LayerNorm(dim)
@@ -109,9 +103,37 @@ class DiTConVBlock(nn.Module):
         x = x + 0.5 * h
         return x
 
+class DiTLynxFusionBlock(nn.Module):
+    def __init__(self, dim: int, dim_cond: int, num_heads: int = 8, dropout: float = 0.1, use_rope: bool = False):
+        super().__init__()
+        self.dit_block = DiTConVBlock(dim, dim_cond, num_heads, dropout, use_rope)
+        self.lynx_block = LYNXNetResidualLayer(
+            dim_cond=dim_cond,
+            dim=dim,
+            expansion_factor=2.0,
+            kernel_size=31,
+            activation='PReLU',
+            dropout=dropout
+        )
+        self.fusion_proj = nn.Sequential(
+            nn.Linear(dim * 2, dim),
+            nn.GELU(),
+            nn.Dropout(dropout)
+        )
+
+    def forward(self, x: torch.Tensor, cond: torch.Tensor, diffusion_step: torch.Tensor) -> torch.Tensor:
+        x_dit = self.dit_block(x, cond, diffusion_step)
+        x_lynx = self.lynx_block(
+            x.transpose(1, 2),
+            cond,
+            diffusion_step.unsqueeze(-1).repeat(1, 1, x.shape[1])
+        ).transpose(1, 2)
+        x_fused = torch.cat([x_dit, x_lynx], dim=-1)
+        return self.fusion_proj(x_fused)
+
 class DiffusionTransformer(nn.Module):
-    def __init__(self, in_dims: int, n_feats: int, *, num_layers: int = 6, num_channels: int = 512, num_heads: int = 8,
-                 dropout: float = 0.1, use_rope: bool = False):
+    def __init__(self, in_dims: int, n_feats: int, *, num_layers: int = 6, num_channels: int = 512,
+                 num_heads: int = 8, dropout: float = 0.1, use_rope: bool = False):
         super().__init__()
         self.in_dims = in_dims
         self.n_feats = n_feats
@@ -123,14 +145,13 @@ class DiffusionTransformer(nn.Module):
             nn.Linear(num_channels * 4, num_channels),
         )
         self.layers = nn.ModuleList([
-            DiTConVBlock(
+            DiTLynxFusionBlock(
                 dim=num_channels,
                 dim_cond=hparams['hidden_size'],
                 num_heads=num_heads,
                 dropout=dropout,
-                use_rope=use_rope,
-            )
-            for _ in range(num_layers)
+                use_rope=use_rope
+            ) for _ in range(num_layers)
         ])
         self.layer_norm = nn.LayerNorm(num_channels)
         self.output_projection = nn.Linear(num_channels, in_dims * n_feats)
@@ -150,7 +171,7 @@ class DiffusionTransformer(nn.Module):
             x = layer(x, cond, diffusion_step)
             if torch.isnan(x).any():
                 print(f"NaN detected after layer {i}")
-                break  #debug
+                break #debug
 
         x = self.layer_norm(x)
         x = self.output_projection(x)
