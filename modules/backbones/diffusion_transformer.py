@@ -91,6 +91,7 @@ class DiTConVBlock(nn.Module):
     def forward(self, x: torch.Tensor, cond: torch.Tensor, diffusion_step: torch.Tensor) -> torch.Tensor:
         # cond: [B, H, T], diffusion_step: [B, dim]
         style = self.cond_proj(cond).transpose(1, 2) + self.diff_proj(diffusion_step).unsqueeze(1)
+        style = torch.clamp(style, min=-5.0, max=5.0) # avoiding crazy modulations
         gamma1, beta1, gamma2, beta2 = style.chunk(4, dim=-1)
 
         h = self.norm1(x)
@@ -103,10 +104,10 @@ class DiTConVBlock(nn.Module):
         h = self.ffn(h)
         x = x + h
         return x
-        
+
 class DiffusionTransformer(nn.Module):
     def __init__(self, in_dims: int, n_feats: int, *, num_layers: int = 6, num_channels: int = 512, num_heads: int = 8,
-        dropout: float = 0.1, use_rope: bool = False):
+                 dropout: float = 0.1, use_rope: bool = False):
         super().__init__()
         self.in_dims = in_dims
         self.n_feats = n_feats
@@ -129,7 +130,7 @@ class DiffusionTransformer(nn.Module):
         ])
         self.layer_norm = nn.LayerNorm(num_channels)
         self.output_projection = nn.Linear(num_channels, in_dims * n_feats)
-        nn.init.zeros_(self.output_projection.weight)
+        nn.init.xavier_uniform_(self.output_projection.weight)
 
     def forward(self, spec: torch.Tensor, diffusion_step: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
         if self.n_feats == 1:
@@ -137,15 +138,23 @@ class DiffusionTransformer(nn.Module):
         else:
             x = spec.flatten(start_dim=1, end_dim=2).transpose(1, 2)
         x = self.input_projection(x)
+
         diffusion_step = self.diffusion_embedding(diffusion_step)
-        diffusion_step = self.mlp(diffusion_step)
-        for layer in self.layers:
+        diffusion_step = self.mlp(diffusion_step) * 0.5 
+
+        for i, layer in enumerate(self.layers):
             x = layer(x, cond, diffusion_step)
+            if torch.isnan(x).any():
+                print(f"NaN detected after layer {i}")
+                break  #debug
+
         x = self.layer_norm(x)
         x = self.output_projection(x)
         x = x.transpose(1, 2)
+
         if self.n_feats == 1:
             x = x[:, None, :, :]
         else:
             x = x.reshape(-1, self.n_feats, self.in_dims, x.shape[2])
         return x
+
