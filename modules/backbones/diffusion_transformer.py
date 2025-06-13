@@ -37,6 +37,7 @@ class MultiHeadAttention(nn.Module):
         assert dim % num_heads == 0, 'dim must be divisible by num_heads'
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
+        self.dim = dim
         self.scale = self.head_dim ** -0.5
 
         self.to_qkv = nn.Linear(dim, dim * 3, bias=False)
@@ -49,7 +50,7 @@ class MultiHeadAttention(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         b, t, c = x.shape
         qkv = self.to_qkv(x)
-        q, k, v = qkv.chunk(3, dim=-1)
+        q, k, v = torch.split(qkv, [self.dim, self.dim, self.dim], dim=-1)
         q = q.view(b, t, self.num_heads, self.head_dim).transpose(1, 2)
         k = k.view(b, t, self.num_heads, self.head_dim).transpose(1, 2)
         v = v.view(b, t, self.num_heads, self.head_dim).transpose(1, 2)
@@ -80,6 +81,7 @@ class DiTConVBlock(nn.Module):
         use_rope: bool = False,
     ):
         super().__init__()
+        self.dim = dim
         self.norm1 = nn.LayerNorm(dim)
         self.attn = MultiHeadAttention(dim, num_heads=num_heads, dropout=dropout, use_rope=use_rope)
         self.norm2 = nn.LayerNorm(dim)
@@ -92,7 +94,7 @@ class DiTConVBlock(nn.Module):
         # cond: [B, H, T], diffusion_step: [B, dim]
         style = self.cond_proj(cond).transpose(1, 2) + self.diff_proj(diffusion_step).unsqueeze(1)
         style = torch.clamp(style, min=-5.0, max=5.0) # avoiding crazy modulations
-        gamma1, beta1, gamma2, beta2 = style.chunk(4, dim=-1)
+        gamma1, beta1, gamma2, beta2 = torch.split(style, [self.dim, self.dim, self.dim, self.dim], dim=-1)
 
         h = self.norm1(x)
         h = h * (1 + gamma1) + beta1
