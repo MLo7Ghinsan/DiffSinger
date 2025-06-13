@@ -1,6 +1,3 @@
-import math
-from typing import Optional
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -58,7 +55,8 @@ class MultiHeadAttention(nn.Module):
         v = v.view(b, t, self.num_heads, self.head_dim).transpose(1, 2)
 
         if self.use_rope:
-            freqs = self.rotary.get_embed(t, device=x.device, dtype=x.dtype)
+            pos = torch.arange(t, device=x.device, dtype=x.dtype)
+            freqs = self.rotary(pos, seq_len=t)
             freqs = freqs.unsqueeze(0).unsqueeze(0)  # [1,1,t,d]
             q = apply_rotary_emb(freqs, q, seq_dim=2)
             k = apply_rotary_emb(freqs, k, seq_dim=2)
