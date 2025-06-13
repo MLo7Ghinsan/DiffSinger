@@ -8,6 +8,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from scipy import interpolate
+from scipy import signal
 
 from basics.base_binarizer import BaseBinarizer, BinarizationError
 from basics.base_pe import BasePE
@@ -60,7 +61,6 @@ breathiness_smooth: SinusoidalSmoothingConv1d = None
 voicing_smooth: SinusoidalSmoothingConv1d = None
 tension_smooth: SinusoidalSmoothingConv1d = None
 
-
 class VarianceBinarizer(BaseBinarizer):
     def __init__(self):
         super().__init__(data_attrs=VARIANCE_ITEM_ATTRIBUTES)
@@ -84,6 +84,51 @@ class VarianceBinarizer(BaseBinarizer):
         self.lr = LengthRegulator().to(self.device)
         self.prefer_ds = self.binarization_args['prefer_ds']
         self.cached_ds = {}
+
+    # from https://github.com/nnsvs/nnsvs/blob/master/nnsvs/dsp.py
+    def lowpass_filter(self, x, fs, cutoff=5, N=5):
+        """Lowpass filter"""
+        nyquist = fs // 2
+        norm_cutoff = cutoff / nyquist
+        b, a = signal.butter(N, norm_cutoff, btype="low")
+        if len(x) <= max(len(a), len(b)) * (N // 2 + 1):
+            return x
+        return signal.filtfilt(b, a, x)
+        
+    # attempt to pitch correction (pitch modeling) as in nnsvs pitch.py
+    def apply_pitch_modeling(self, f0_hz: np.ndarray, note_midi: np.ndarray, mel2note: torch.Tensor) -> np.ndarray:
+        note_hz = librosa.midi_to_hz(note_midi)
+        frame_note_hz = torch.gather(
+            F.pad(torch.from_numpy(note_hz), [1, 0], value=0), 0, mel2note
+        ).numpy()
+    
+        valid = (f0_hz > 0) & (frame_note_hz > 0)
+        if valid.sum() == 0:
+            return f0_hz
+    
+        ratio = frame_note_hz[valid] / f0_hz[valid]
+    
+        outlier_threshold = hparams['pitch_correction_outlier_threshold']
+        max_ratio = np.exp(outlier_threshold * np.log(2) / 1200)
+        min_ratio = 1 / max_ratio
+        ratio = ratio[(ratio > min_ratio) & (ratio < max_ratio)]
+        if len(ratio) == 0:
+            return f0_hz
+    
+        correction_factor = np.mean(ratio)
+        max_cent = hparams['pitch_correction_max_cent']
+        correction_factor = np.clip(
+            correction_factor,
+            np.exp(-max_cent * np.log(2) / 1200),
+            np.exp(max_cent * np.log(2) / 1200),
+        )
+        f0_hz_corrected = f0_hz * correction_factor
+    
+        if hparams['vibrato_smoothing_cutoff'] > 0:
+            f0_hz_corrected = self.lowpass_filter(
+                f0_hz_corrected, sr=100, cutoff=hparams['vibrato_smoothing_cutoff']
+            )
+        return f0_hz_corrected
 
     def load_attr_from_ds(self, ds_id, name, attr, idx=0):
         item_name = f'{ds_id}:{name}'
@@ -356,7 +401,13 @@ class VarianceBinarizer(BaseBinarizer):
                 self.lr, note_dur_sec, mel2ph.shape[0], self.timestep, device=self.device
             )
             processed_input['mel2note'] = mel2note.cpu().numpy()
-
+            if hparams['use_pitch_modeling']:
+                f0 = self.apply_pitch_modeling(
+                    f0, note_midi.cpu().numpy(), mel2note
+                )
+                uv = f0 == 0
+                f0, _ = interp_f0(f0, uv)
+                pitch = torch.from_numpy(librosa.hz_to_midi(f0.astype(np.float32))).to(self.device)
             # Below: get ornament attributes
             if hparams['use_glide_embed']:
                 processed_input['note_glide'] = np.array([
