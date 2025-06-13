@@ -201,6 +201,24 @@ Scale ratio of random time stretching augmentation.
 <tr><td align="center"><b>default</b></td><td>0.75</td>
 </tbody></table>
 
+### backbone_args
+
+Keyword arguments for the backbone of main decoder module.
+
+<table><tbody>
+<tr><td align="center"><b>visibility</b></td><td>acoustic, variance</td>
+<tr><td align="center"><b>scope</b></td><td>nn</td>
+<tr><td align="center"><b>type</b></td><td>dict</td>
+</tbody></table>
+
+Some available arguments are listed below.
+
+|     argument name     | for backbone type |                                                 description                                                 |
+|:---------------------:|:-----------------:|:-----------------------------------------------------------------------------------------------------------:|
+|      num_layers       |  wavenet/lynxnet  |                               Number of layer blocks, or depth of the network                               |
+|     num_channels      |  wavenet/lynxnet  |                                 Number of channels, or width of the network                                 |
+| dilation_cycle_length |      wavenet      | Length k of the cycle $2^0, 2^1 ...., 2^k$ of convolution dilation factors through WaveNet residual blocks. |
+
 ### backbone_type
 
 Backbone type of the main decoder/predictor module.
@@ -208,9 +226,10 @@ Backbone type of the main decoder/predictor module.
 <table><tbody>
 <tr><td align="center"><b>visibility</b></td><td>acoustic, variance</td>
 <tr><td align="center"><b>scope</b></td><td>nn</td>
-<tr><td align="center"><b>customizability</b></td><td>reserved</td>
+<tr><td align="center"><b>customizability</b></td><td>normal</td>
 <tr><td align="center"><b>type</b></td><td>str</td>
-<tr><td align="center"><b>default</b></td><td>wavenet</td>
+<tr><td align="center"><b>default</b></td><td>lynxnet</td>
+<tr><td align="center"><b>constraints</b></td><td>Choose from 'wavenet', 'lynxnet'.</td>
 </tbody></table>
 
 ### base_config
@@ -360,15 +379,84 @@ The key that indexes the binarized metadata to be used as the `sizes` when batch
 <tr><td align="center"><b>default</b></td><td>lengths</td>
 </tbody></table>
 
-### dictionary
+### datasets
 
-Path to the word-phoneme mapping dictionary file. Training data must fully cover phonemes in the dictionary.
+List of dataset configs for preprocessing.
+
+<table><tbody>
+<tr><td align="center"><b>visibility</b></td><td>acoustic, variance</td>
+<tr><td align="center"><b>scope</b></td><td>preprocessing</td>
+<tr><td align="center"><b>type</b></td><td>List[dict]</td>
+</tbody></table>
+
+### datasets[].language
+
+Language context of this dataset. Must be a key of [dictionaries](#dictionaries).
+
+<table><tbody>
+<tr><td align="center"><b>visibility</b></td><td>acoustic, variance</td>
+<tr><td align="center"><b>scope</b></td><td>preprocessing</td>
+<tr><td align="center"><b>customizability</b></td><td>required</td>
+<tr><td align="center"><b>type</b></td><td>str</td>
+</tbody></table>
+
+### datasets[].raw_data_dir
+
+Path to this dataset including wave files, transcriptions, etc.
+
+<table><tbody>
+<tr><td align="center"><b>visibility</b></td><td>all</td>
+<tr><td align="center"><b>scope</b></td><td>preprocessing</td>
+<tr><td align="center"><b>customizability</b></td><td>required</td>
+<tr><td align="center"><b>type</b></td><td>str</td>
+</tbody></table>
+
+### datasets[].speaker
+
+The name of speaker of this dataset. Speaker names are mapped to speaker indexes and stored into spk_map.json when preprocessing.
+
+<table><tbody>
+<tr><td align="center"><b>visibility</b></td><td>acoustic, variance</td>
+<tr><td align="center"><b>scope</b></td><td>preprocessing</td>
+<tr><td align="center"><b>customizability</b></td><td>required</td>
+<tr><td align="center"><b>type</b></td><td>str</td>
+</tbody></table>
+
+### datasets[].spk_id
+
+The speaker ID assigned to this dataset. Will be automatically assigned if not given. IDs can be duplicate or discontinuous to merge multiple datasets to one speaker.
 
 <table><tbody>
 <tr><td align="center"><b>visibility</b></td><td>acoustic, variance</td>
 <tr><td align="center"><b>scope</b></td><td>preprocessing</td>
 <tr><td align="center"><b>customizability</b></td><td>normal</td>
-<tr><td align="center"><b>type</b></td><td>str</td>
+<tr><td align="center"><b>type</b></td><td>int</td>
+</tbody></table>
+
+### datasets[].test_prefixes
+
+List of data item names or name prefixes in this dataset for the validation set. For each string `s` in the list:
+
+- If `s` equals to an actual item name, add that item to validation set.
+- If `s` does not equal to any item names, add all items whose names start with `s` to validation set.
+
+<table><tbody>
+<tr><td align="center"><b>visibility</b></td><td>all</td>
+<tr><td align="center"><b>scope</b></td><td>preprocessing</td>
+<tr><td align="center"><b>customizability</b></td><td>required</td>
+<tr><td align="center"><b>type</b></td><td>list</td>
+</tbody></table>
+
+### dictionaries
+
+Map of language names and their corresponding dictionary file paths. The phonemes in these dictionaries will be combined as the final phoneme set and have their phoneme IDs. Training data must fully cover all phoneme IDs.
+
+<table><tbody>
+<tr><td align="center"><b>visibility</b></td><td>acoustic, variance</td>
+<tr><td align="center"><b>scope</b></td><td>preprocessing</td>
+<tr><td align="center"><b>customizability</b></td><td>required</td>
+<tr><td align="center"><b>type</b></td><td>Dict[str, str]</td>
+<tr><td align="center"><b>default</b></td><td>{}</td>
 </tbody></table>
 
 ### diff_accelerator
@@ -416,18 +504,6 @@ The type of ODE-based generative model algorithm. The following models are curre
 <tr><td align="center"><b>type</b></td><td>str</td>
 <tr><td align="center"><b>default</b></td><td>reflow</td>
 <tr><td align="center"><b>constraints</b></td><td>Choose from 'ddpm', 'reflow'.</td>
-</tbody></table>
-
-### dilation_cycle_length
-
-Length k of the cycle $2^0, 2^1 ...., 2^k$ of convolution dilation factors through WaveNet residual blocks.
-
-<table><tbody>
-<tr><td align="center"><b>visibility</b></td><td>acoustic</td>
-<tr><td align="center"><b>scope</b></td><td>nn</td>
-<tr><td align="center"><b>customizability</b></td><td>not recommended</td>
-<tr><td align="center"><b>type</b></td><td>int</td>
-<tr><td align="center"><b>default</b></td><td>4</td>
 </tbody></table>
 
 ### dropout
@@ -597,7 +673,7 @@ Size of TransformerFFNLayer convolution kernel size in FastSpeech2 encoder.
 <tr><td align="center"><b>scope</b></td><td>nn</td>
 <tr><td align="center"><b>customizability</b></td><td>not recommended</td>
 <tr><td align="center"><b>type</b></td><td>int</td>
-<tr><td align="center"><b>default</b></td><td>9</td>
+<tr><td align="center"><b>default</b></td><td>3</td>
 </tbody></table>
 
 ### enc_layers
@@ -646,6 +722,18 @@ Length of sinusoidal smoothing convolution kernel (in seconds) on extracted ener
 <tr><td align="center"><b>customizability</b></td><td>normal</td>
 <tr><td align="center"><b>type</b></td><td>float</td>
 <tr><td align="center"><b>default</b></td><td>0.12</td>
+</tbody></table>
+
+### extra_phonemes
+
+Extra phonemes to be added to the phoneme set. This list can be used to define custom global phoneme tags besides `AP` and `SP`, or to contain phonemes that are not present in any of the dictionaries.
+
+<table><tbody>
+<tr><td align="center"><b>visibility</b></td><td>acoustic, variance</td>
+<tr><td align="center"><b>scope</b></td><td>preprocessing</td>
+<tr><td align="center"><b>customizability</b></td><td>normal</td>
+<tr><td align="center"><b>type</b></td><td>list</td>
+<tr><td align="center"><b>default</b></td><td>[]</td>
 </tbody></table>
 
 ### f0_max
@@ -830,6 +918,30 @@ Dimension of hidden layers of FastSpeech2, token and parameter embeddings, and d
 <tr><td align="center"><b>customizability</b></td><td>normal</td>
 <tr><td align="center"><b>type</b></td><td>int</td>
 <tr><td align="center"><b>default</b></td><td>256</td>
+</tbody></table>
+
+### hnsep
+
+Harmonic-noise separation algorithm type.
+
+<table><tbody>
+<tr><td align="center"><b>visibility</b></td><td>all</td>
+<tr><td align="center"><b>scope</b></td><td>preprocessing</td>
+<tr><td align="center"><b>customizability</b></td><td>normal</td>
+<tr><td align="center"><b>type</b></td><td>str</td>
+<tr><td align="center"><b>default</b></td><td>world</td>
+<tr><td align="center"><b>constraints</b></td><td>Choose from 'world', 'vr'.</td>
+</tbody></table>
+
+### hnsep_ckpt
+
+Checkpoint or model path of NN-based harmonic-noise separator.
+
+<table><tbody>
+<tr><td align="center"><b>visibility</b></td><td>all</td>
+<tr><td align="center"><b>scope</b></td><td>preprocessing</td>
+<tr><td align="center"><b>customizability</b></td><td>normal</td>
+<tr><td align="center"><b>type</b></td><td>str</td>
 </tbody></table>
 
 ### hop_size
@@ -1049,10 +1161,12 @@ The maximum validation batch size.
 
 The logarithmic base of mel spectrogram calculation.
 
+**WARNING: Since v2.4.0 release, this value is no longer configurable for preprocessing new datasets.**
+
 <table><tbody>
 <tr><td align="center"><b>visibility</b></td><td>acoustic</td>
 <tr><td align="center"><b>scope</b></td><td>preprocessing</td>
-<tr><td align="center"><b>customizability</b></td><td>not recommended</td>
+<tr><td align="center"><b>customizability</b></td><td>reserved</td>
 <tr><td align="center"><b>type</b></td><td>str</td>
 <tr><td align="center"><b>default</b></td><td>e</td>
 </tbody></table>
@@ -1087,6 +1201,18 @@ Arguments for melody encoder. Available sub-keys: `hidden_size`, `enc_layers`, `
 
 <table><tbody>
 <tr><td align="center"><b>type</b></td><td>dict</td>
+</tbody></table>
+
+### merged_phoneme_groups
+
+Phoneme groups to merge. Each group is a phoneme name list. The merged phonemes share the same ID and thus the same phoneme embedding.
+
+<table><tbody>
+<tr><td align="center"><b>visibility</b></td><td>acoustic, variance</td>
+<tr><td align="center"><b>scope</b></td><td>preprocessing</td>
+<tr><td align="center"><b>customizability</b></td><td>required</td>
+<tr><td align="center"><b>type</b></td><td>list</td>
+<tr><td align="center"><b>default</b></td><td>[]</td>
 </tbody></table>
 
 ### midi_smooth_width
@@ -1135,6 +1261,17 @@ The number of attention heads of `torch.nn.MultiheadAttention` in FastSpeech2 en
 <tr><td align="center"><b>customizability</b></td><td>not recommended</td>
 <tr><td align="center"><b>type</b></td><td>int</td>
 <tr><td align="center"><b>default</b></td><td>2</td>
+</tbody></table>
+
+### num_lang
+
+Number of languages. This value is used to allocate language embeddings in the linguistic encoder.
+
+<table><tbody>
+<tr><td align="center"><b>visibility</b></td><td>acoustic, variance</td>
+<tr><td align="center"><b>scope</b></td><td>nn</td>
+<tr><td align="center"><b>customizability</b></td><td>required</td>
+<tr><td align="center"><b>type</b></td><td>int</td>
 </tbody></table>
 
 ### num_sanity_val_steps
@@ -1195,7 +1332,7 @@ Optimizer class name
 
 ### pe
 
-Pitch extractor type.
+Pitch extraction algorithm type.
 
 <table><tbody>
 <tr><td align="center"><b>visibility</b></td><td>all</td>
@@ -1247,13 +1384,21 @@ Arguments for pitch prediction.
 <tr><td align="center"><b>type</b></td><td>dict</td>
 </tbody></table>
 
-### pitch_prediction_args.dilation_cycle_length
+### pitch_prediction_args.backbone_args
 
-Equivalent to [dilation_cycle_length](#dilation_cycle_length) but only for the pitch predictor model.
+Equivalent to [backbone_args](#backbone_args) but only for the pitch predictor model.  If not set, use the root backbone type.
 
 <table><tbody>
 <tr><td align="center"><b>visibility</b></td><td>variance</td>
-<tr><td align="center"><b>default</b></td><td>5</td>
+</tbody></table>
+
+### pitch_prediction_args.backbone_type
+
+Equivalent to [backbone_type](#backbone_type) but only for the pitch predictor model.
+
+<table><tbody>
+<tr><td align="center"><b>visibility</b></td><td>variance</td>
+<tr><td align="center"><b>default</b></td><td>wavenet</td>
 </tbody></table>
 
 ### pitch_prediction_args.pitd_clip_max
@@ -1312,24 +1457,6 @@ Number of repeating bins in the pitch predictor.
 <tr><td align="center"><b>customizability</b></td><td>recommended</td>
 <tr><td align="center"><b>type</b></td><td>int</td>
 <tr><td align="center"><b>default</b></td><td>64</td>
-</tbody></table>
-
-### pitch_prediction_args.residual_channels
-
-Equivalent to [residual_channels](#residual_channels) but only for the pitch predictor.
-
-<table><tbody>
-<tr><td align="center"><b>visibility</b></td><td>variance</td>
-<tr><td align="center"><b>default</b></td><td>256</td>
-</tbody></table>
-
-### pitch_prediction_args.residual_layers
-
-Equivalent to [residual_layers](#residual_layers) but only for the pitch predictor.
-
-<table><tbody>
-<tr><td align="center"><b>visibility</b></td><td>variance</td>
-<tr><td align="center"><b>default</b></td><td>20</td>
 </tbody></table>
 
 ### pl_trainer_accelerator
@@ -1476,17 +1603,6 @@ Whether to enable voicing prediction.
 <tr><td align="center"><b>default</b></td><td>true</td>
 </tbody></table>
 
-### raw_data_dir
-
-Path(s) to the raw dataset including wave files, transcriptions, etc.
-
-<table><tbody>
-<tr><td align="center"><b>visibility</b></td><td>all</td>
-<tr><td align="center"><b>scope</b></td><td>preprocessing</td>
-<tr><td align="center"><b>customizability</b></td><td>required</td>
-<tr><td align="center"><b>type</b></td><td>str, List[str]</td>
-</tbody></table>
-
 ### rel_pos
 
 Whether to use relative positional encoding in FastSpeech2 module.
@@ -1497,30 +1613,6 @@ Whether to use relative positional encoding in FastSpeech2 module.
 <tr><td align="center"><b>customizability</b></td><td>not recommended</td>
 <tr><td align="center"><b>type</b></td><td>boolean</td>
 <tr><td align="center"><b>default</b></td><td>true</td>
-</tbody></table>
-
-### residual_channels
-
-Number of dilated convolution channels in residual blocks in WaveNet.
-
-<table><tbody>
-<tr><td align="center"><b>visibility</b></td><td>acoustic</td>
-<tr><td align="center"><b>scope</b></td><td>nn</td>
-<tr><td align="center"><b>customizability</b></td><td>normal</td>
-<tr><td align="center"><b>type</b></td><td>int</td>
-<tr><td align="center"><b>default</b></td><td>512</td>
-</tbody></table>
-
-### residual_layers
-
-Number of residual blocks in WaveNet.
-
-<table><tbody>
-<tr><td align="center"><b>visibility</b></td><td>acoustic</td>
-<tr><td align="center"><b>scope</b></td><td>nn</td>
-<tr><td align="center"><b>customizability</b></td><td>normal</td>
-<tr><td align="center"><b>type</b></td><td>int</td>
-<tr><td align="center"><b>default</b></td><td>20</td>
 </tbody></table>
 
 ### sampler_frame_count_grid
@@ -1675,29 +1767,6 @@ Whether to apply the _sorting by similar length_ algorithm described in [sampler
 <tr><td align="center"><b>default</b></td><td>true</td>
 </tbody></table>
 
-### speakers
-
-The names of speakers in a multi-speaker model. Speaker names are mapped to speaker indexes and stored into spk_map.json when preprocessing.
-
-<table><tbody>
-<tr><td align="center"><b>visibility</b></td><td>acoustic, variance</td>
-<tr><td align="center"><b>scope</b></td><td>preprocessing</td>
-<tr><td align="center"><b>customizability</b></td><td>required</td>
-<tr><td align="center"><b>type</b></td><td>list</td>
-</tbody></table>
-
-### spk_ids
-
-The IDs of speakers in a multi-speaker model. If an empty list is given, speaker IDs will be automatically generated as $0,1,2,...,N_{spk}-1$. IDs can be duplicate or discontinuous.
-
-<table><tbody>
-<tr><td align="center"><b>visibility</b></td><td>acoustic, variance</td>
-<tr><td align="center"><b>scope</b></td><td>preprocessing</td>
-<tr><td align="center"><b>customizability</b></td><td>required</td>
-<tr><td align="center"><b>type</b></td><td>List[int]</td>
-<tr><td align="center"><b>default</b></td><td>[]</td>
-</tbody></table>
-
 ### spec_min
 
 Minimum mel spectrogram value used for normalization to [-1, 1]. Different mel bins can have different minimum values.
@@ -1802,22 +1871,6 @@ Length of sinusoidal smoothing convolution kernel (in seconds) on extracted tens
 <tr><td align="center"><b>default</b></td><td>0.12</td>
 </tbody></table>
 
-### test_prefixes
-
-List of data item names or name prefixes for the validation set. For each string `s` in the list:
-
-- If `s` equals to an actual item name, add that item to validation set.
-- If `s` does not equal to any item names, add all items whose names start with `s` to validation set.
-
-For multi-speaker combined datasets, "ds_id:name_prefix" can be used to apply the rules above within data from a specific sub-dataset, where ds_id represents the dataset index.
-
-<table><tbody>
-<tr><td align="center"><b>visibility</b></td><td>all</td>
-<tr><td align="center"><b>scope</b></td><td>preprocessing</td>
-<tr><td align="center"><b>customizability</b></td><td>required</td>
-<tr><td align="center"><b>type</b></td><td>list</td>
-</tbody></table>
-
 ### time_scale_factor
 
 The scale factor that will be multiplied on the time $t$ of Rectified Flow before embedding into the model.
@@ -1892,6 +1945,18 @@ Whether to embed key shifting values introduced by random pitch shifting augment
 <tr><td align="center"><b>constraints</b></td><td>Must be true if random pitch shifting is enabled.</td>
 </tbody></table>
 
+### use_lang_id
+
+Whether to embed the language ID from a multilingual dataset. This option only takes effect for those cross-lingual phonemes in the merged groups.
+
+<table><tbody>
+<tr><td align="center"><b>visibility</b></td><td>acoustic, variance</td>
+<tr><td align="center"><b>scope</b></td><td>nn, preprocessing, inference</td>
+<tr><td align="center"><b>customizability</b></td><td>recommended</td>
+<tr><td align="center"><b>type</b></td><td>bool</td>
+<tr><td align="center"><b>default</b></td><td>false</td>
+</tbody></table>
+
 ### use_melody_encoder
 
 Whether to enable melody encoder for the pitch predictor.
@@ -1907,6 +1972,18 @@ Whether to enable melody encoder for the pitch predictor.
 ### use_pos_embed
 
 Whether to use SinusoidalPositionalEmbedding in FastSpeech2 encoder.
+
+<table><tbody>
+<tr><td align="center"><b>visibility</b></td><td>acoustic, variance</td>
+<tr><td align="center"><b>scope</b></td><td>nn</td>
+<tr><td align="center"><b>customizability</b></td><td>not recommended</td>
+<tr><td align="center"><b>type</b></td><td>boolean</td>
+<tr><td align="center"><b>default</b></td><td>true</td>
+</tbody></table>
+
+### use_rope
+
+Whether to use RoPE (Rotary Positional Encoding) in FastSpeech2 encoder.
 
 <table><tbody>
 <tr><td align="center"><b>visibility</b></td><td>acoustic, variance</td>
@@ -1942,7 +2019,7 @@ Whether to embed speed values introduced by random time stretching augmentation.
 
 ### use_spk_id
 
-Whether embed the speaker id from a multi-speaker dataset.
+Whether to embed the speaker ID from a multi-speaker dataset.
 
 <table><tbody>
 <tr><td align="center"><b>visibility</b></td><td>acoustic, variance</td>
@@ -2008,13 +2085,21 @@ Arguments for prediction of variance parameters other than pitch, like energy, b
 <tr><td align="center"><b>type</b></td><td>dict</td>
 </tbody></table>
 
-### variances_prediction_args.dilation_cycle_length
+### variances_prediction_args.backbone_args
 
-Equivalent to [dilation_cycle_length](#dilation_cycle_length) but only for the multi-variance predictor model.
+Equivalent to [backbone_args](#backbone_args) but only for the multi-variance predictor.
 
 <table><tbody>
 <tr><td align="center"><b>visibility</b></td><td>variance</td>
-<tr><td align="center"><b>default</b></td><td>4</td>
+</tbody></table>
+
+### variances_prediction_args.backbone_type
+
+Equivalent to [backbone_type](#backbone_type) but only for the multi-variance predictor model. If not set, use the root backbone type.
+
+<table><tbody>
+<tr><td align="center"><b>visibility</b></td><td>variance</td>
+<tr><td align="center"><b>default</b></td><td>wavenet</td>
 </tbody></table>
 
 ### variances_prediction_args.total_repeat_bins
@@ -2027,24 +2112,6 @@ Total number of repeating bins in the multi-variance predictor. Repeating bins a
 <tr><td align="center"><b>customizability</b></td><td>recommended</td>
 <tr><td align="center"><b>type</b></td><td>int</td>
 <tr><td align="center"><b>default</b></td><td>48</td>
-</tbody></table>
-
-### variances_prediction_args.residual_channels
-
-Equivalent to [residual_channels](#residual_channels) but only for the multi-variance predictor.
-
-<table><tbody>
-<tr><td align="center"><b>visibility</b></td><td>variance</td>
-<tr><td align="center"><b>default</b></td><td>192</td>
-</tbody></table>
-
-### variances_prediction_args.residual_layers
-
-Equivalent to [residual_layers](#residual_layers) but only for the multi-variance predictor.
-
-<table><tbody>
-<tr><td align="center"><b>visibility</b></td><td>variance</td>
-<tr><td align="center"><b>default</b></td><td>10</td>
 </tbody></table>
 
 ### vocoder

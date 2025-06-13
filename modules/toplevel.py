@@ -5,6 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
+import modules.compat as compat
 from basics.base_module import CategorizedModule
 from modules.aux_decoder import AuxDecoderAdaptor
 from modules.commons.common_layers import (
@@ -53,18 +54,16 @@ class DiffSingerAcoustic(CategorizedModule, ParameterAdaptorModule):
                 aux_decoder_args=self.shallow_args['aux_decoder_args']
             )
         self.diffusion_type = hparams.get('diffusion_type', 'ddpm')
+        self.backbone_type = compat.get_backbone_type(hparams)
+        self.backbone_args = compat.get_backbone_args(hparams, self.backbone_type)
         if self.diffusion_type == 'ddpm':
             self.diffusion = GaussianDiffusion(
                 out_dims=out_dims,
                 num_feats=1,
                 timesteps=hparams['timesteps'],
                 k_step=hparams['K_step'],
-                backbone_type=hparams.get('backbone_type', hparams.get('diff_decoder_type')),
-                backbone_args={
-                    'n_layers': hparams['residual_layers'],
-                    'n_chans': hparams['residual_channels'],
-                    'n_dilates': hparams['dilation_cycle_length'],
-                },
+                backbone_type=self.backbone_type,
+                backbone_args=self.backbone_args,
                 spec_min=hparams['spec_min'],
                 spec_max=hparams['spec_max']
             )
@@ -74,12 +73,8 @@ class DiffSingerAcoustic(CategorizedModule, ParameterAdaptorModule):
                 num_feats=1,
                 t_start=hparams['T_start'],
                 time_scale_factor=hparams['time_scale_factor'],
-                backbone_type=hparams.get('backbone_type', hparams.get('diff_decoder_type')),
-                backbone_args={
-                    'n_layers': hparams['residual_layers'],
-                    'n_chans': hparams['residual_channels'],
-                    'n_dilates': hparams['dilation_cycle_length'],
-                },
+                backbone_type=self.backbone_type,
+                backbone_args=self.backbone_args,
                 spec_min=hparams['spec_min'],
                 spec_max=hparams['spec_max']
             )
@@ -88,11 +83,12 @@ class DiffSingerAcoustic(CategorizedModule, ParameterAdaptorModule):
 
     def forward(
             self, txt_tokens, mel2ph, f0, key_shift=None, speed=None,
-            spk_embed_id=None, gt_mel=None, infer=True, **kwargs
+            spk_embed_id=None, languages=None, gt_mel=None, infer=True, **kwargs
     ) -> ShallowDiffusionOutput:
         condition = self.fs2(
             txt_tokens, mel2ph, f0, key_shift=key_shift, speed=speed,
-            spk_embed_id=spk_embed_id, **kwargs
+            spk_embed_id=spk_embed_id, languages=languages,
+            **kwargs
         )
         if infer:
             if self.use_shallow_diffusion:
@@ -157,7 +153,8 @@ class DiffSingerVariance(CategorizedModule, ParameterAdaptorModule):
 
             self.pitch_retake_embed = Embedding(2, hparams['hidden_size'])
             pitch_hparams = hparams['pitch_prediction_args']
-
+            self.pitch_backbone_type = compat.get_backbone_type(hparams, nested_config=pitch_hparams)
+            self.pitch_backbone_args = compat.get_backbone_args(pitch_hparams, backbone_type=self.pitch_backbone_type)
             if self.diffusion_type == 'ddpm':
                 self.pitch_predictor = PitchDiffusion(
                     vmin=pitch_hparams['pitd_norm_min'],
@@ -167,12 +164,8 @@ class DiffSingerVariance(CategorizedModule, ParameterAdaptorModule):
                     repeat_bins=pitch_hparams['repeat_bins'],
                     timesteps=hparams['timesteps'],
                     k_step=hparams['K_step'],
-                    backbone_type=hparams.get('backbone_type', hparams.get('diff_decoder_type')),
-                    backbone_args={
-                        'n_layers': pitch_hparams['residual_layers'],
-                        'n_chans': pitch_hparams['residual_channels'],
-                        'n_dilates': pitch_hparams['dilation_cycle_length'],
-                    }
+                    backbone_type=self.pitch_backbone_type,
+                    backbone_args=self.pitch_backbone_args
                 )
             elif self.diffusion_type == 'reflow':
                 self.pitch_predictor = PitchRectifiedFlow(
@@ -182,12 +175,8 @@ class DiffSingerVariance(CategorizedModule, ParameterAdaptorModule):
                     cmax=pitch_hparams['pitd_clip_max'],
                     repeat_bins=pitch_hparams['repeat_bins'],
                     time_scale_factor=hparams['time_scale_factor'],
-                    backbone_type=hparams.get('backbone_type', hparams.get('diff_decoder_type')),
-                    backbone_args={
-                        'n_layers': pitch_hparams['residual_layers'],
-                        'n_chans': pitch_hparams['residual_channels'],
-                        'n_dilates': pitch_hparams['dilation_cycle_length'],
-                    }
+                    backbone_type=self.pitch_backbone_type,
+                    backbone_args=self.pitch_backbone_args
                 )
             else:
                 raise ValueError(f"Invalid diffusion type: {self.diffusion_type}")
@@ -211,7 +200,8 @@ class DiffSingerVariance(CategorizedModule, ParameterAdaptorModule):
             note_midi=None, note_rest=None, note_dur=None, note_glide=None, mel2note=None,
             base_pitch=None, pitch=None, pitch_expr=None, pitch_retake=None,
             variance_retake: Dict[str, Tensor] = None,
-            spk_id=None, infer=True, **kwargs
+            spk_id=None, languages=None,
+            infer=True, **kwargs
     ):
         if self.use_spk_id:
             ph_spk_mix_embed = kwargs.get('ph_spk_mix_embed')
@@ -227,7 +217,8 @@ class DiffSingerVariance(CategorizedModule, ParameterAdaptorModule):
         encoder_out, dur_pred_out = self.fs2(
             txt_tokens, midi=midi, ph2word=ph2word,
             ph_dur=ph_dur, word_dur=word_dur,
-            spk_embed=ph_spk_embed, infer=infer
+            spk_embed=ph_spk_embed, languages=languages,
+            infer=infer
         )
 
         if not self.predict_pitch and not self.predict_variances:

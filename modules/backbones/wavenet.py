@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from modules.commons.common_layers import SinusoidalPosEmb
 from utils.hparams import hparams
 
 
@@ -12,21 +13,6 @@ class Conv1d(torch.nn.Conv1d):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         nn.init.kaiming_normal_(self.weight)
-
-
-class SinusoidalPosEmb(nn.Module):
-    def __init__(self, dim):
-        super().__init__()
-        self.dim = dim
-
-    def forward(self, x):
-        device = x.device
-        half_dim = self.dim // 2
-        emb = math.log(10000) / (half_dim - 1)
-        emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
-        emb = x[:, None] * emb[None, :]
-        emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
-        return emb
 
 
 class ResidualBlock(nn.Module):
@@ -63,27 +49,27 @@ class ResidualBlock(nn.Module):
 
 
 class WaveNet(nn.Module):
-    def __init__(self, in_dims, n_feats, *, n_layers=20, n_chans=256, n_dilates=4):
+    def __init__(self, in_dims, n_feats, *, num_layers=20, num_channels=256, dilation_cycle_length=4):
         super().__init__()
         self.in_dims = in_dims
         self.n_feats = n_feats
-        self.input_projection = Conv1d(in_dims * n_feats, n_chans, 1)
-        self.diffusion_embedding = SinusoidalPosEmb(n_chans)
+        self.input_projection = Conv1d(in_dims * n_feats, num_channels, 1)
+        self.diffusion_embedding = SinusoidalPosEmb(num_channels)
         self.mlp = nn.Sequential(
-            nn.Linear(n_chans, n_chans * 4),
+            nn.Linear(num_channels, num_channels * 4),
             nn.Mish(),
-            nn.Linear(n_chans * 4, n_chans)
+            nn.Linear(num_channels * 4, num_channels)
         )
         self.residual_layers = nn.ModuleList([
             ResidualBlock(
                 encoder_hidden=hparams['hidden_size'],
-                residual_channels=n_chans,
-                dilation=2 ** (i % n_dilates)
+                residual_channels=num_channels,
+                dilation=2 ** (i % dilation_cycle_length)
             )
-            for i in range(n_layers)
+            for i in range(num_layers)
         ])
-        self.skip_projection = Conv1d(n_chans, n_chans, 1)
-        self.output_projection = Conv1d(n_chans, in_dims * n_feats, 1)
+        self.skip_projection = Conv1d(num_channels, num_channels, 1)
+        self.output_projection = Conv1d(num_channels, in_dims * n_feats, 1)
         nn.init.zeros_(self.output_projection.weight)
 
     def forward(self, spec, diffusion_step, cond):

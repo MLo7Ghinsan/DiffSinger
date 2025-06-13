@@ -5,7 +5,7 @@ task_cls: null
 # dataset
 #############
 sort_by_len: true
-raw_data_dir: null
+datasets: []
 binary_data_dir: null
 binarizer_cls: null
 binarization_args:
@@ -28,7 +28,7 @@ dropout: 0.1
 use_pos_embed: true
 enc_layers: 4
 num_heads: 2
-enc_ffn_kernel_size: 9
+enc_ffn_kernel_size: 3
 ffn_act: gelu
 use_spk_id: false
 
@@ -60,8 +60,10 @@ max_batch_frames: 32000
 max_batch_size: 100000
 max_val_batch_frames: 60000
 max_val_batch_size: 1
-pe: 'parselmouth'
-pe_ckpt: ''
+pe: parselmouth
+pe_ckpt: 'checkpoints/rmvpe/model.pt'
+hnsep: vr
+hnsep_ckpt: 'checkpoints/vr/model.pt'
 f0_min: 65
 f0_max: 1100
 num_valid_plots: 10

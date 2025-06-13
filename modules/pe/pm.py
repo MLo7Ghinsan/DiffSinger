@@ -10,5 +10,6 @@ class ParselmouthPE(BasePE):
     ):
         return get_pitch_parselmouth(
             waveform, samplerate=samplerate, length=length,
-            hop_size=hop_size, speed=speed, interp_uv=interp_uv
+            hop_size=hop_size, f0_min=f0_min, f0_max=f0_max,
+            speed=speed, interp_uv=interp_uv
         )

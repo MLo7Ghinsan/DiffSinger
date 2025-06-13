@@ -9,8 +9,9 @@ import utils.infer_utils
 from basics.base_dataset import BaseDataset
 from basics.base_task import BaseTask
 from modules.losses import DurationLoss, DiffusionLoss, RectifiedFlowLoss
-from modules.metrics.curve import RawCurveAccuracy
-from modules.metrics.duration import RhythmCorrectness, PhonemeDurationAccuracy
+from modules.metrics import (
+    RawCurveAccuracy, RawCurveR2Score, RhythmCorrectness, PhonemeDurationAccuracy
+)
 from modules.toplevel import DiffSingerVariance
 from utils.hparams import hparams
 from utils.plot import dur_to_figure, pitch_note_to_figure, curve_to_figure
@@ -41,6 +42,8 @@ class VarianceDataset(BaseDataset):
 
         if hparams['use_spk_id']:
             batch['spk_ids'] = torch.LongTensor([s['spk_id'] for s in samples])
+        if hparams['use_lang_id']:
+            batch['languages'] = utils.collate_nd([s['languages'] for s in samples], 0)
         if hparams['predict_dur']:
             batch['ph2word'] = utils.collate_nd([s['ph2word'] for s in samples], 0)
             batch['midi'] = utils.collate_nd([s['midi'] for s in samples], 0)
@@ -85,6 +88,7 @@ class VarianceTask(BaseTask):
         self.diffusion_type = hparams['diffusion_type']
 
         self.use_spk_id = hparams['use_spk_id']
+        self.use_lang_id = hparams['use_lang_id']
 
         self.predict_dur = hparams['predict_dur']
         if self.predict_dur:
@@ -113,7 +117,7 @@ class VarianceTask(BaseTask):
 
     def _build_model(self):
         return DiffSingerVariance(
-            vocab_size=len(self.phone_encoder),
+            vocab_size=len(self.phoneme_dictionary),
         )
 
     # noinspection PyAttributeOutsideInit
@@ -141,6 +145,7 @@ class VarianceTask(BaseTask):
                 raise ValueError(f'Unknown diffusion type: {self.diffusion_type}')
             self.register_validation_loss('pitch_loss')
             self.register_validation_metric('pitch_acc', RawCurveAccuracy(tolerance=0.5))
+            self.register_validation_metric('pitch_r2', RawCurveR2Score())
         if self.predict_variances:
             if self.diffusion_type == 'ddpm':
                 self.var_loss = DiffusionLoss(loss_type=hparams['main_loss_type'])
@@ -151,9 +156,12 @@ class VarianceTask(BaseTask):
             else:
                 raise ValueError(f'Unknown diffusion type: {self.diffusion_type}')
             self.register_validation_loss('var_loss')
+            for name in self.variance_prediction_list:
+                self.register_validation_metric(f'{name}_r2', RawCurveR2Score())
 
     def run_model(self, sample, infer=False):
         spk_ids = sample['spk_ids'] if self.use_spk_id else None  # [B,]
+        languages = sample['languages'] if self.use_lang_id else None  # [B,]
         txt_tokens = sample['tokens']  # [B, T_ph]
         ph_dur = sample['ph_dur']  # [B, T_ph]
         ph2word = sample.get('ph2word')  # [B, T_ph]
@@ -188,7 +196,8 @@ class VarianceTask(BaseTask):
                 }
 
         output = self.model(
-            txt_tokens, midi=midi, ph2word=ph2word,
+            txt_tokens, languages=languages,
+            midi=midi, ph2word=ph2word,
             ph_dur=ph_dur, mel2ph=mel2ph,
             note_midi=note_midi, note_rest=note_rest,
             note_dur=note_dur, note_glide=note_glide, mel2note=mel2note,
@@ -262,13 +271,17 @@ class VarianceTask(BaseTask):
                         self.valid_metrics['ph_dur_acc'].update(
                             pdur_pred=pred_dur, pdur_target=gt_dur, ph2word=ph2word, mask=mask
                         )
-                        self.plot_dur(data_idx, gt_dur, pred_dur, tokens)
+                        self.plot_dur(
+                            data_idx, gt_dur, pred_dur,
+                            txt=self.valid_dataset.metadata['ph_texts'][data_idx].split()
+                        )
                     if pitch_preds is not None:
                         pitch_len = self.valid_dataset.metadata['pitch'][data_idx]
                         pred_pitch = sample_get('base_pitch', i, data_idx) + pitch_preds[i][:pitch_len].unsqueeze(0)
                         gt_pitch = sample_get('pitch', i, data_idx)
                         mask = (sample_get('mel2ph', i, data_idx) > 0) & ~sample_get('uv', i, data_idx)
                         self.valid_metrics['pitch_acc'].update(pred=pred_pitch, target=gt_pitch, mask=mask)
+                        self.valid_metrics['pitch_r2'].update(pred=pred_pitch, target=gt_pitch, mask=mask)
                         self.plot_pitch(
                             data_idx,
                             gt_pitch=gt_pitch,
@@ -281,6 +294,8 @@ class VarianceTask(BaseTask):
                         variance_len = self.valid_dataset.metadata[name][data_idx]
                         gt_variances = sample[name][i][:variance_len].unsqueeze(0)
                         pred_variances = variances_preds[name][i][:variance_len].unsqueeze(0)
+                        mask = (sample_get('mel2ph', i, data_idx) > 0) & ~sample_get('uv', i, data_idx)
+                        self.valid_metrics[f'{name}_r2'].update(pred=pred_variances, target=gt_variances, mask=mask)
                         self.plot_curve(
                             data_idx,
                             gt_curve=gt_variances,
@@ -295,7 +310,6 @@ class VarianceTask(BaseTask):
     def plot_dur(self, data_idx, gt_dur, pred_dur, txt=None):
         gt_dur = gt_dur[0].cpu().numpy()
         pred_dur = pred_dur[0].cpu().numpy()
-        txt = self.phone_encoder.decode(txt[0].cpu().numpy()).split()
         title_text = f"{self.valid_dataset.metadata['spk_names'][data_idx]} - {self.valid_dataset.metadata['names'][data_idx]}"
         self.logger.all_rank_experiment.add_figure(f'dur_{data_idx}', dur_to_figure(
             gt_dur, pred_dur, txt, title_text

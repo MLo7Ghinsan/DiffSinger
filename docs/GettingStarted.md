@@ -6,7 +6,7 @@
 
 DiffSinger requires Python 3.8 or later. We strongly recommend you create a virtual environment via Conda or venv before installing dependencies.
 
-1. Install PyTorch 1.13 or later following the [official instructions](https://pytorch.org/get-started/locally/) according to your OS and hardware.
+1. Install The latest PyTorch following the [official instructions](https://pytorch.org/get-started/locally/) according to your OS and hardware.
 
 2. Install other dependencies via the following command:
 
@@ -14,9 +14,9 @@ DiffSinger requires Python 3.8 or later. We strongly recommend you create a virt
    pip install -r requirements.txt
    ```
 
-### Materials and assets
+### Concepts and materials
 
-Some essential materials and assets are needed before continuing with this repository. See [materials for training and using models](BestPractices.md#materials-for-training-and-using-models) for detailed instructions.
+Before you proceed, it is necessary to understand some fundamental concepts in this repository and prepare some materials and assets. See [fundamental concepts and materials](BestPractices.md#fundamental-concepts-and-materials) for detailed information.
 
 ## Configuration
 
@@ -98,7 +98,21 @@ for more configurable options.
 
 ## Deployment
 
-DiffSinger uses [ONNX](https://onnx.ai/) as the deployment format. Due to TorchScript issues, exporting to ONNX now requires PyTorch **1.13**. Assume that you have a model named `my_experiment`.
+DiffSinger uses [ONNX](https://onnx.ai/) as the deployment format.
+
+Due to TorchScript issues, exporting to ONNX now requires PyTorch **1.13**. Please ensure the correct dependencies through following steps:
+
+1. Create a new separate environment for exporting ONNX.
+
+2. Install PyTorch 1.13 following the [official instructions](https://pytorch.org/get-started/previous-versions/). A CPU-only version is enough.
+
+3. Install other dependencies via the following command:
+
+   ```bash
+   pip install -r requirements-onnx.txt
+   ```
+
+Assume that you have a model named `my_experiment`.
 
 If your model is a variance model, run:
 
@@ -147,5 +161,4 @@ python scripts/export.py nsf-hifigan --help
 There are other useful CLI tools in the [scripts/](../scripts) directory not mentioned above:
 
 - drop_spk.py - delete speaker embeddings from checkpoints (for data security reasons when distributing models)
-- migrate.py - migrate old transcription files or checkpoints from previous versions of DiffSinger
-- vocoder.py - bypass the acoustic model and only run the vocoder on given mel-spectrograms.
+- vocoder.py - bypass the acoustic model and only run the vocoder on given mel-spectrograms

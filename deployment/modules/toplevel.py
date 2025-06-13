@@ -18,12 +18,13 @@ from utils.hparams import hparams
 
 
 class DiffSingerAcousticONNX(DiffSingerAcoustic):
-    def __init__(self, vocab_size, out_dims):
+    def __init__(self, vocab_size, out_dims, cross_lingual_token_idx=None):
         super().__init__(vocab_size, out_dims)
         del self.fs2
         del self.diffusion
         self.fs2 = FastSpeech2AcousticONNX(
-            vocab_size=vocab_size
+            vocab_size=vocab_size,
+            cross_lingual_token_idx=cross_lingual_token_idx
         )
         if self.diffusion_type == 'ddpm':
             self.diffusion = GaussianDiffusionONNX(
@@ -31,12 +32,8 @@ class DiffSingerAcousticONNX(DiffSingerAcoustic):
                 num_feats=1,
                 timesteps=hparams['timesteps'],
                 k_step=hparams['K_step'],
-                backbone_type=hparams.get('backbone_type', hparams.get('diff_decoder_type')),
-                backbone_args={
-                    'n_layers': hparams['residual_layers'],
-                    'n_chans': hparams['residual_channels'],
-                    'n_dilates': hparams['dilation_cycle_length'],
-                },
+                backbone_type=self.backbone_type,
+                backbone_args=self.backbone_args,
                 spec_min=hparams['spec_min'],
                 spec_max=hparams['spec_max']
             )
@@ -46,17 +43,20 @@ class DiffSingerAcousticONNX(DiffSingerAcoustic):
                 num_feats=1,
                 t_start=hparams['T_start'],
                 time_scale_factor=hparams['time_scale_factor'],
-                backbone_type=hparams.get('backbone_type', hparams.get('diff_decoder_type')),
-                backbone_args={
-                    'n_layers': hparams['residual_layers'],
-                    'n_chans': hparams['residual_channels'],
-                    'n_dilates': hparams['dilation_cycle_length'],
-                },
+                backbone_type=self.backbone_type,
+                backbone_args=self.backbone_args,
                 spec_min=hparams['spec_min'],
                 spec_max=hparams['spec_max']
             )
         else:
             raise ValueError(f"Invalid diffusion type: {self.diffusion_type}")
+        self.mel_base = hparams.get('mel_base', '10')
+
+    def ensure_mel_base(self, mel):
+        if self.mel_base != 'e':
+            # log10 mel to log mel
+            mel = mel * 2.30259
+        return mel
 
     def forward_fs2_aux(
             self,
@@ -66,11 +66,13 @@ class DiffSingerAcousticONNX(DiffSingerAcoustic):
             variances: dict,
             gender: Tensor = None,
             velocity: Tensor = None,
-            spk_embed: Tensor = None
+            spk_embed: Tensor = None,
+            languages: Tensor = None
     ):
         condition = self.fs2(
             tokens, durations, f0, variances=variances,
-            gender=gender, velocity=velocity, spk_embed=spk_embed
+            gender=gender, velocity=velocity, spk_embed=spk_embed,
+            languages=languages
         )
         if self.use_shallow_diffusion:
             aux_mel_pred = self.aux_decoder(condition, infer=True)
@@ -80,21 +82,25 @@ class DiffSingerAcousticONNX(DiffSingerAcoustic):
 
     def forward_shallow_diffusion(
             self, condition: Tensor, x_start: Tensor,
-            depth: int, speedup: int
+            depth, steps: int
     ) -> Tensor:
-        return self.diffusion(condition, x_start=x_start, depth=depth, speedup=speedup)
+        mel_pred = self.diffusion(condition, x_start=x_start, depth=depth, steps=steps)
+        return self.ensure_mel_base(mel_pred)
 
-    def forward_diffusion(self, condition: Tensor, speedup: int):
-        return self.diffusion(condition, speedup=speedup)
+    def forward_diffusion(self, condition: Tensor, steps: int):
+        mel_pred = self.diffusion(condition, steps=steps)
+        return self.ensure_mel_base(mel_pred)
 
     def forward_shallow_reflow(
             self, condition: Tensor, x_end: Tensor,
             depth, steps: int
     ):
-        return self.diffusion(condition, x_end=x_end, depth=depth, steps=steps)
+        mel_pred = self.diffusion(condition, x_end=x_end, depth=depth, steps=steps)
+        return self.ensure_mel_base(mel_pred)
 
     def forward_reflow(self, condition: Tensor, steps: int):
-        return self.diffusion(condition, steps=steps)
+        mel_pred = self.diffusion(condition, steps=steps)
+        return self.ensure_mel_base(mel_pred)
 
     def view_as_fs2_aux(self) -> nn.Module:
         model = copy.deepcopy(self)
@@ -124,11 +130,12 @@ class DiffSingerAcousticONNX(DiffSingerAcoustic):
 
 
 class DiffSingerVarianceONNX(DiffSingerVariance):
-    def __init__(self, vocab_size):
+    def __init__(self, vocab_size, cross_lingual_token_idx=None):
         super().__init__(vocab_size=vocab_size)
         del self.fs2
         self.fs2 = FastSpeech2VarianceONNX(
-            vocab_size=vocab_size
+            vocab_size=vocab_size,
+            cross_lingual_token_idx=cross_lingual_token_idx
         )
         self.hidden_size = hparams['hidden_size']
         if self.predict_pitch:
@@ -144,12 +151,8 @@ class DiffSingerVarianceONNX(DiffSingerVariance):
                     repeat_bins=pitch_hparams['repeat_bins'],
                     timesteps=hparams['timesteps'],
                     k_step=hparams['K_step'],
-                    backbone_type=hparams.get('backbone_type', hparams.get('diff_decoder_type')),
-                    backbone_args={
-                        'n_layers': pitch_hparams['residual_layers'],
-                        'n_chans': pitch_hparams['residual_channels'],
-                        'n_dilates': pitch_hparams['dilation_cycle_length'],
-                    }
+                    backbone_type=self.pitch_backbone_type,
+                    backbone_args=self.pitch_backbone_args
                 )
             elif self.diffusion_type == 'reflow':
                 self.pitch_predictor = PitchRectifiedFlowONNX(
@@ -159,12 +162,8 @@ class DiffSingerVarianceONNX(DiffSingerVariance):
                     cmax=pitch_hparams['pitd_clip_max'],
                     repeat_bins=pitch_hparams['repeat_bins'],
                     time_scale_factor=hparams['time_scale_factor'],
-                    backbone_type=hparams.get('backbone_type', hparams.get('diff_decoder_type')),
-                    backbone_args={
-                        'n_layers': pitch_hparams['residual_layers'],
-                        'n_chans': pitch_hparams['residual_channels'],
-                        'n_dilates': pitch_hparams['dilation_cycle_length'],
-                    }
+                    backbone_type=self.pitch_backbone_type,
+                    backbone_args=self.pitch_backbone_args
                 )
             else:
                 raise ValueError(f"Invalid diffusion type: {self.diffusion_type}")
@@ -199,13 +198,13 @@ class DiffSingerVarianceONNX(DiffSingerVariance):
             encoder_out += self.frozen_spk_embed
         return encoder_out
 
-    def forward_linguistic_encoder_word(self, tokens, word_div, word_dur):
-        encoder_out, x_masks = self.fs2.forward_encoder_word(tokens, word_div, word_dur)
+    def forward_linguistic_encoder_word(self, tokens, word_div, word_dur, languages=None):
+        encoder_out, x_masks = self.fs2.forward_encoder_word(tokens, word_div, word_dur, languages=languages)
         encoder_out = self.embed_frozen_spk(encoder_out)
         return encoder_out, x_masks
 
-    def forward_linguistic_encoder_phoneme(self, tokens, ph_dur):
-        encoder_out, x_masks = self.fs2.forward_encoder_phoneme(tokens, ph_dur)
+    def forward_linguistic_encoder_phoneme(self, tokens, ph_dur, languages=None):
+        encoder_out, x_masks = self.fs2.forward_encoder_phoneme(tokens, ph_dur, languages=languages)
         encoder_out = self.embed_frozen_spk(encoder_out)
         return encoder_out, x_masks
 
@@ -261,12 +260,6 @@ class DiffSingerVarianceONNX(DiffSingerVariance):
             pitch_cond += spk_embed
         return pitch_cond, base_pitch
 
-    def forward_pitch_diffusion(
-            self, pitch_cond, speedup: int = 1
-    ):
-        x_pred = self.pitch_predictor(pitch_cond, speedup=speedup)
-        return x_pred
-
     def forward_pitch_reflow(
             self, pitch_cond, steps: int = 10
     ):
@@ -295,10 +288,6 @@ class DiffSingerVarianceONNX(DiffSingerVariance):
         if hparams['use_spk_id'] and spk_embed is not None:
             variance_cond += spk_embed
         return variance_cond
-
-    def forward_variance_diffusion(self, variance_cond, speedup: int = 1):
-        xs_pred = self.variance_predictor(variance_cond, speedup=speedup)
-        return xs_pred
 
     def forward_variance_reflow(self, variance_cond, steps: int = 10):
         xs_pred = self.variance_predictor(variance_cond, steps=steps)
@@ -350,19 +339,7 @@ class DiffSingerVarianceONNX(DiffSingerVariance):
         model.forward = model.forward_pitch_preprocess
         return model
 
-    def view_as_pitch_diffusion(self):
-        assert self.predict_pitch
-        model = copy.deepcopy(self)
-        del model.fs2
-        del model.lr
-        if self.use_melody_encoder:
-            del model.melody_encoder
-        if self.predict_variances:
-            del model.variance_predictor
-        model.forward = model.forward_pitch_diffusion
-        return model
-
-    def view_as_pitch_reflow(self):
+    def view_as_pitch_predictor(self):
         assert self.predict_pitch
         model = copy.deepcopy(self)
         del model.fs2
@@ -396,19 +373,7 @@ class DiffSingerVarianceONNX(DiffSingerVariance):
         model.forward = model.forward_variance_preprocess
         return model
 
-    def view_as_variance_diffusion(self):
-        assert self.predict_variances
-        model = copy.deepcopy(self)
-        del model.fs2
-        del model.lr
-        if self.predict_pitch:
-            del model.pitch_predictor
-            if self.use_melody_encoder:
-                del model.melody_encoder
-        model.forward = model.forward_variance_diffusion
-        return model
-
-    def view_as_variance_reflow(self):
+    def view_as_variance_predictor(self):
         assert self.predict_variances
         model = copy.deepcopy(self)
         del model.fs2

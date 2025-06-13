@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 
-from modules.backbones import BACKBONES
+from modules.backbones import build_backbone
 from utils.hparams import hparams
 
 
@@ -15,7 +15,7 @@ class RectifiedFlow(nn.Module):
                  backbone_type=None, backbone_args=None,
                  spec_min=None, spec_max=None):
         super().__init__()
-        self.velocity_fn: nn.Module = BACKBONES[backbone_type](out_dims, num_feats, **backbone_args)
+        self.velocity_fn: nn.Module = build_backbone(out_dims, num_feats, backbone_type, backbone_args)
         self.out_dims = out_dims
         self.num_feats = num_feats
         self.use_shallow_diffusion = hparams.get('use_shallow_diffusion', False)

@@ -14,14 +14,14 @@ from basics.base_pe import BasePE
 from modules.fastspeech.tts_modules import LengthRegulator
 from modules.pe import initialize_pe
 from utils.binarizer_utils import (
-    DecomposedWaveform,
     SinusoidalSmoothingConv1d,
     get_mel2ph_torch,
     get_energy_librosa,
-    get_breathiness_pyworld,
-    get_voicing_pyworld,
+    get_breathiness,
+    get_voicing,
     get_tension_base_harmonic,
 )
+from utils.decomposed_waveform import DecomposedWaveform
 from utils.hparams import hparams
 from utils.infer_utils import resample_align_curve
 from utils.pitch_utils import interp_f0
@@ -30,6 +30,7 @@ from utils.plot import distribution_to_figure
 os.environ["OMP_NUM_THREADS"] = "1"
 VARIANCE_ITEM_ATTRIBUTES = [
     'spk_id',  # index number of dataset/speaker, int64
+    'languages',  # index numbers of phoneme languages, int64[T_ph,]
     'tokens',  # index numbers of phonemes, int64[T_ph,]
     'ph_dur',  # durations of phonemes, in number of frames, int64[T_ph,]
     'midi',  # phoneme-level mean MIDI pitch, int64[T_ph,]
@@ -108,7 +109,7 @@ class VarianceBinarizer(BaseBinarizer):
             ds = ds[idx]
         return ds.get(attr)
 
-    def load_meta_data(self, raw_data_dir: pathlib.Path, ds_id, spk_id):
+    def load_meta_data(self, raw_data_dir: pathlib.Path, ds_id, spk, lang):
         meta_data_dict = {}
 
         with open(raw_data_dir / 'transcriptions.csv', 'r', encoding='utf8') as f:
@@ -117,28 +118,41 @@ class VarianceBinarizer(BaseBinarizer):
                 item_name = utterance_label['name']
                 item_idx = int(item_name.rsplit(DS_INDEX_SEP, maxsplit=1)[-1]) if DS_INDEX_SEP in item_name else 0
 
-                def require(attr):
+                def require(attr, optional=False):
                     if self.prefer_ds:
                         value = self.load_attr_from_ds(ds_id, item_name, attr, item_idx)
                     else:
                         value = None
                     if value is None:
                         value = utterance_label.get(attr)
-                    if value is None:
+                    if value is None and not optional:
                         raise ValueError(f'Missing required attribute {attr} of item \'{item_name}\'.')
                     return value
 
                 temp_dict = {
                     'ds_idx': item_idx,
-                    'spk_id': spk_id,
-                    'spk_name': self.speakers[ds_id],
+                    'spk_id': self.spk_map[spk],
+                    'spk_name': spk,
+                    'language_id': self.lang_map[lang],
+                    'language_name': lang,
                     'wav_fn': str(raw_data_dir / 'wavs' / f'{item_name}.wav'),
-                    'ph_seq': require('ph_seq').split(),
-                    'ph_dur': [float(x) for x in require('ph_dur').split()]
+                    'lang_seq': [
+                        (
+                            self.lang_map[lang if '/' not in p else p.split('/', maxsplit=1)[0]]
+                            if self.phoneme_dictionary.is_cross_lingual(p)
+                            else 0
+                        )
+                        for p in utterance_label['ph_seq'].split()
+                    ],
+                    'ph_seq': self.phoneme_dictionary.encode(require('ph_seq'), lang=lang),
+                    'ph_dur': [float(x) for x in require('ph_dur').split()],
+                    'ph_text': require('ph_seq'),
                 }
 
                 assert len(temp_dict['ph_seq']) == len(temp_dict['ph_dur']), \
                     f'Lengths of ph_seq and ph_dur mismatch in \'{item_name}\'.'
+                assert all(ph_dur >= 0 for ph_dur in temp_dict['ph_dur']), \
+                    f'Negative ph_dur found in \'{item_name}\'.'
 
                 if hparams['predict_dur']:
                     temp_dict['ph_num'] = [int(x) for x in require('ph_num').split()]
@@ -148,16 +162,27 @@ class VarianceBinarizer(BaseBinarizer):
                 if hparams['predict_pitch']:
                     temp_dict['note_seq'] = require('note_seq').split()
                     temp_dict['note_dur'] = [float(x) for x in require('note_dur').split()]
+                    assert all(note_dur >= 0 for note_dur in temp_dict['note_dur']), \
+                        f'Negative note_dur found in \'{item_name}\'.'
                     assert len(temp_dict['note_seq']) == len(temp_dict['note_dur']), \
                         f'Lengths of note_seq and note_dur mismatch in \'{item_name}\'.'
                     assert any([note != 'rest' for note in temp_dict['note_seq']]), \
                         f'All notes are rest in \'{item_name}\'.'
                     if hparams['use_glide_embed']:
-                        temp_dict['note_glide'] = require('note_glide').split()
+                        note_glide = require('note_glide', optional=True)
+                        if note_glide is None:
+                            note_glide = ['none' for _ in temp_dict['note_seq']]
+                        else:
+                            note_glide = note_glide.split()
+                            assert len(note_glide) == len(temp_dict['note_seq']), \
+                                f'Lengths of note_seq and note_glide mismatch in \'{item_name}\'.'
+                            assert all(g in self.glide_map for g in note_glide), \
+                                f'Invalid glide type found in \'{item_name}\'.'
+                        temp_dict['note_glide'] = note_glide
 
                 meta_data_dict[f'{ds_id}:{item_name}'] = temp_dict
 
-        self.items.update(meta_data_dict)
+        return meta_data_dict
 
     def check_coverage(self):
         super().check_coverage()
@@ -245,7 +270,9 @@ class VarianceBinarizer(BaseBinarizer):
             'spk_name': meta_data['spk_name'],
             'seconds': seconds,
             'length': length,
-            'tokens': np.array(self.phone_encoder.encode(meta_data['ph_seq']), dtype=np.int64)
+            'languages': np.array(meta_data['lang_seq'], dtype=np.int64),
+            'tokens': np.array(meta_data['ph_seq'], dtype=np.int64),
+            'ph_text': meta_data['ph_text'],
         }
 
         ph_dur_sec = torch.FloatTensor(meta_data['ph_dur']).to(self.device)
@@ -384,10 +411,11 @@ class VarianceBinarizer(BaseBinarizer):
 
             processed_input['energy'] = energy
 
-        # create a DeconstructedWaveform object for further feature extraction
+        # create a DecomposedWaveform object for further feature extraction
         dec_waveform = DecomposedWaveform(
             waveform, samplerate=hparams['audio_sample_rate'], f0=f0 * ~uv,
-            hop_size=hparams['hop_size'], fft_size=hparams['fft_size'], win_size=hparams['win_size']
+            hop_size=hparams['hop_size'], fft_size=hparams['fft_size'], win_size=hparams['win_size'],
+            algorithm=hparams['hnsep']
         ) if waveform is not None else None
 
         # Below: extract breathiness
@@ -406,7 +434,7 @@ class VarianceBinarizer(BaseBinarizer):
                         align_length=length
                     )
             if breathiness is None:
-                breathiness = get_breathiness_pyworld(
+                breathiness = get_breathiness(
                     dec_waveform, None, None, length=length
                 )
                 breathiness_from_wav = True
@@ -437,7 +465,7 @@ class VarianceBinarizer(BaseBinarizer):
                         align_length=length
                     )
             if voicing is None:
-                voicing = get_voicing_pyworld(
+                voicing = get_voicing(
                     dec_waveform, None, None, length=length
                 )
                 voicing_from_wav = True

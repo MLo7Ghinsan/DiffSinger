@@ -1,4 +1,4 @@
-import shutil
+import json
 from pathlib import Path
 from typing import List, Union, Tuple, Dict
 
@@ -12,8 +12,7 @@ from deployment.modules.toplevel import DiffSingerAcousticONNX
 from modules.fastspeech.param_adaptor import VARIANCE_CHECKLIST
 from utils import load_ckpt, onnx_helper, remove_suffix
 from utils.hparams import hparams
-from utils.phoneme_utils import locate_dictionary, build_phoneme_list
-from utils.text_encoder import TokenTextEncoder
+from utils.phoneme_utils import load_phoneme_dictionary
 
 
 class DiffSingerAcousticExporter(BaseExporter):
@@ -32,7 +31,9 @@ class DiffSingerAcousticExporter(BaseExporter):
         self.model_name: str = hparams['exp_name']
         self.ckpt_steps: int = ckpt_steps
         self.spk_map: dict = self.build_spk_map()
-        self.vocab = TokenTextEncoder(vocab_list=build_phoneme_list())
+        self.lang_map: dict = self.build_lang_map()
+        self.phoneme_dictionary = load_phoneme_dictionary()
+        self.use_lang_id = hparams.get('use_lang_id', False) and len(self.phoneme_dictionary.cross_lingual_phonemes) > 0
         self.model = self.build_model()
         self.fs2_aux_cache_path = self.cache_dir / (
             'fs2_aux.onnx' if self.model.use_shallow_diffusion else 'fs2.onnx'
@@ -78,18 +79,14 @@ class DiffSingerAcousticExporter(BaseExporter):
             if self.freeze_spk is not None:
                 self.model.fs2.register_buffer('frozen_spk_embed', self._perform_spk_mix(self.freeze_spk[1]))
 
-        # Acceleration
-        if self.model.diffusion_type == 'ddpm':
-            self.acceleration_type = 'discrete'
-        elif self.model.diffusion_type == 'reflow':
-            self.acceleration_type = 'continuous'
-        else:
-            raise ValueError(f'Invalid diffusion type: {self.model.diffusion_type}')
-
     def build_model(self) -> DiffSingerAcousticONNX:
         model = DiffSingerAcousticONNX(
-            vocab_size=len(self.vocab),
-            out_dims=hparams['audio_num_mel_bins']
+            vocab_size=len(self.phoneme_dictionary),
+            out_dims=hparams['audio_num_mel_bins'],
+            cross_lingual_token_idx=sorted({
+                self.phoneme_dictionary.encode_one(p)
+                for p in self.phoneme_dictionary.cross_lingual_phonemes
+            })
         ).eval().to(self.device)
         load_ckpt(model, hparams['work_dir'], ckpt_steps=self.ckpt_steps,
                   prefix_in_ckpt='model', strict=True, device=self.device)
@@ -119,15 +116,17 @@ class DiffSingerAcousticExporter(BaseExporter):
                 path / f'{self.model_name}.{spk[0]}.emb',
                 self._perform_spk_mix(spk[1])
             )
-        self._export_dictionary(path / 'dictionary.txt')
-        self._export_phonemes(path / f'{self.model_name}.phonemes.txt')
+        self.export_dictionaries(path)
+        self._export_phonemes(path)
 
         model_name = self.model_name
         if self.freeze_spk is not None:
             model_name += '.' + self.freeze_spk[0]
         dsconfig = {
             # basic configs
-            'phonemes': f'{self.model_name}.phonemes.txt',
+            'phonemes': f'{self.model_name}.phonemes.json',
+            'languages': f'{self.model_name}.languages.json',
+            'use_lang_id': self.use_lang_id,
             'acoustic': f'{model_name}.onnx',
             'hidden_size': hparams['hidden_size'],
             'vocoder': 'nsf_hifigan_44.1k_hop512_128bin_2024.02',
@@ -147,12 +146,9 @@ class DiffSingerAcousticExporter(BaseExporter):
         for variance in VARIANCE_CHECKLIST:
             dsconfig[f'use_{variance}_embed'] = (variance in self.model.fs2.variance_embed_list)
         # sampling acceleration and shallow diffusion
-        dsconfig['use_continuous_acceleration'] = self.acceleration_type == 'continuous'
+        dsconfig['use_continuous_acceleration'] = True
         dsconfig['use_variable_depth'] = self.model.use_shallow_diffusion
-        if self.acceleration_type == 'continuous':
-            dsconfig['max_depth'] = 1 - self.model.diffusion.t_start
-        else:
-            dsconfig['max_depth'] = self.model.diffusion.k_step
+        dsconfig['max_depth'] = 1 - self.model.diffusion.t_start
         # mel specification
         dsconfig['sample_rate'] = hparams['audio_sample_rate']
         dsconfig['hop_size'] = hparams['hop_size']
@@ -161,7 +157,7 @@ class DiffSingerAcousticExporter(BaseExporter):
         dsconfig['num_mel_bins'] = hparams['audio_num_mel_bins']
         dsconfig['mel_fmin'] = hparams['fmin']
         dsconfig['mel_fmax'] = hparams['fmax'] if hparams['fmax'] is not None else hparams['audio_sample_rate'] / 2
-        dsconfig['mel_base'] = str(hparams.get('mel_base', '10'))
+        dsconfig['mel_base'] = 'e'
         dsconfig['mel_scale'] = 'slaney'
         config_path = path / 'dsconfig.yaml'
         with open(config_path, 'w', encoding='utf8') as fw:
@@ -222,6 +218,12 @@ class DiffSingerAcousticExporter(BaseExporter):
             dynamix_axes['spk_embed'] = {
                 1: 'n_frames'
             }
+        if self.use_lang_id:
+            kwargs['languages'] = torch.zeros_like(tokens)
+            input_names.append('languages')
+            dynamix_axes['languages'] = {
+                1: 'n_tokens'
+            }
         dynamix_axes['condition'] = {
             1: 'n_frames'
         }
@@ -250,14 +252,9 @@ class DiffSingerAcousticExporter(BaseExporter):
         shape = (1, 1, hparams['audio_num_mel_bins'], n_frames)
         noise = torch.randn(shape, device=self.device)
         x_aux = torch.randn((1, n_frames, hparams['audio_num_mel_bins']), device=self.device)
-        if self.acceleration_type == 'continuous':
-            time_or_step = (torch.rand((1,), device=self.device) * self.model.diffusion.time_scale_factor).float()
-            dummy_depth = torch.tensor(0.1, device=self.device)
-            dummy_steps_or_speedup = 5
-        else:
-            time_or_step = (torch.rand((1,), device=self.device) * self.model.diffusion.k_step).long()
-            dummy_depth = torch.tensor(0.1, device=self.device)
-            dummy_steps_or_speedup = 200
+        dummy_time = (torch.rand((1,), device=self.device) * self.model.diffusion.time_scale_factor).float()
+        dummy_depth = torch.tensor(0.1, device=self.device)
+        dummy_steps = 5
 
         print(f'Tracing {self.backbone_class_name} backbone...')
         if self.model.diffusion_type == 'ddpm':
@@ -271,7 +268,7 @@ class DiffSingerAcousticExporter(BaseExporter):
                 major_mel_decoder.diffusion.backbone,
                 (
                     noise,
-                    time_or_step,
+                    dummy_time,
                     condition.transpose(1, 2)
                 )
             )
@@ -291,7 +288,7 @@ class DiffSingerAcousticExporter(BaseExporter):
                 ),
                 (
                     *diffusion_inputs,
-                    dummy_steps_or_speedup  # p_sample_plms branch
+                    dummy_steps  # p_sample_plms branch
                 )
             ]
         )
@@ -302,13 +299,13 @@ class DiffSingerAcousticExporter(BaseExporter):
             major_mel_decoder,
             (
                 *diffusion_inputs,
-                dummy_steps_or_speedup
+                dummy_steps
             ),
             self.diffusion_cache_path,
             input_names=[
                 'condition',
                 *(['x_aux', 'depth'] if self.model.use_shallow_diffusion else []),
-                ('steps' if self.acceleration_type == 'continuous' else 'speedup')
+                'steps'
             ],
             output_names=[
                 'mel'
@@ -350,6 +347,10 @@ class DiffSingerAcousticExporter(BaseExporter):
         print(f'Running ONNX Simplifier on {self.fs2_aux_class_name}...')
         fs2, check = onnxsim.simplify(fs2, include_subgraph=True)
         assert check, 'Simplified ONNX model could not be validated'
+        onnx_helper.model_reorder_io_list(
+            fs2, 'input',
+            target_name='languages', insert_after_name='tokens'
+        )
         print(f'| optimize graph: {self.fs2_aux_class_name}')
         return fs2
 
@@ -411,11 +412,11 @@ class DiffSingerAcousticExporter(BaseExporter):
             f.write(spk_embed.cpu().numpy().tobytes())
         print(f'| export spk embed => {path}')
 
-    # noinspection PyMethodMayBeStatic
-    def _export_dictionary(self, path: Path):
-        print(f'| export dictionary => {path}')
-        shutil.copy(locate_dictionary(), path)
-
     def _export_phonemes(self, path: Path):
-        self.vocab.store_to_file(path)
-        print(f'| export phonemes => {path}')
+        ph_path = path / f'{self.model_name}.phonemes.json'
+        self.phoneme_dictionary.dump(ph_path)
+        print(f'| export phonemes => {ph_path}')
+        lang_path = path / f'{self.model_name}.languages.json'
+        with open(lang_path, 'w', encoding='utf8') as f:
+            json.dump(self.lang_map, f, ensure_ascii=False, indent=2)
+        print(f'| export languages => {lang_path}')

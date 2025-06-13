@@ -9,12 +9,8 @@ import torch
 from torch import nn
 from tqdm import tqdm
 
-from modules.backbones.wavenet import WaveNet
+from modules.backbones import build_backbone
 from utils.hparams import hparams
-
-BACKBONES = {
-    'wavenet': WaveNet
-}
 
 
 def extract(a, t, x_shape):
@@ -61,7 +57,7 @@ class GaussianDiffusion(nn.Module):
                  backbone_type=None, backbone_args=None, betas=None,
                  spec_min=None, spec_max=None):
         super().__init__()
-        self.denoise_fn: nn.Module = BACKBONES[backbone_type](out_dims, num_feats, **backbone_args)
+        self.denoise_fn: nn.Module = build_backbone(out_dims, num_feats, backbone_type, backbone_args)
         self.out_dims = out_dims
         self.num_feats = num_feats
 
@@ -111,6 +107,12 @@ class GaussianDiffusion(nn.Module):
         spec_max = torch.FloatTensor(spec_max)[None, None, :out_dims].transpose(-3, -2)
         self.register_buffer('spec_min', spec_min)
         self.register_buffer('spec_max', spec_max)
+
+        # for compatibility with ONNX continuous acceleration
+        self.time_scale_factor = self.timesteps
+        self.t_start = 1 - self.k_step / self.timesteps
+        factors = torch.LongTensor([i for i in range(1, self.timesteps + 1) if self.timesteps % i == 0])
+        self.register_buffer('timestep_factors', factors, persistent=False)
 
     def q_mean_variance(self, x_start, t):
         mean = extract(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start

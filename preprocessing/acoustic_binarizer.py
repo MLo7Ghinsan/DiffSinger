@@ -21,21 +21,22 @@ from basics.base_pe import BasePE
 from modules.fastspeech.tts_modules import LengthRegulator
 from modules.pe import initialize_pe
 from utils.binarizer_utils import (
-    DecomposedWaveform,
     SinusoidalSmoothingConv1d,
     get_mel_torch,
     get_mel2ph_torch,
     get_energy_librosa,
-    get_breathiness_pyworld,
-    get_voicing_pyworld,
+    get_breathiness,
+    get_voicing,
     get_tension_base_harmonic,
 )
+from utils.decomposed_waveform import DecomposedWaveform
 from utils.hparams import hparams
 
 os.environ["OMP_NUM_THREADS"] = "1"
 ACOUSTIC_ITEM_ATTRIBUTES = [
     'spk_id',
     'mel',
+    'languages',
     'tokens',
     'mel2ph',
     'f0',
@@ -62,24 +63,39 @@ class AcousticBinarizer(BaseBinarizer):
         self.need_breathiness = hparams['use_breathiness_embed']
         self.need_voicing = hparams['use_voicing_embed']
         self.need_tension = hparams['use_tension_embed']
+        assert hparams['mel_base'] == 'e', (
+            "Mel base must be set to \'e\' according to 2nd stage of the migration plan. "
+            "See https://github.com/openvpi/DiffSinger/releases/tag/v2.3.0 for more details."
+        )
 
-    def load_meta_data(self, raw_data_dir: pathlib.Path, ds_id, spk_id):
+    def load_meta_data(self, raw_data_dir: pathlib.Path, ds_id, spk, lang):
         meta_data_dict = {}
         with open(raw_data_dir / 'transcriptions.csv', 'r', encoding='utf-8') as f:
             for utterance_label in csv.DictReader(f):
                 item_name = utterance_label['name']
                 temp_dict = {
                     'wav_fn': str(raw_data_dir / 'wavs' / f'{item_name}.wav'),
-                    'ph_seq': utterance_label['ph_seq'].split(),
+                    'spk_id': self.spk_map[spk],
+                    'spk_name': spk,
+                    'lang_seq': [
+                        (
+                            self.lang_map[lang if '/' not in p else p.split('/', maxsplit=1)[0]]
+                            if self.phoneme_dictionary.is_cross_lingual(p)
+                            else 0
+                        )
+                        for p in utterance_label['ph_seq'].split()
+                    ],
+                    'ph_seq': self.phoneme_dictionary.encode(utterance_label['ph_seq'], lang=lang),
                     'ph_dur': [float(x) for x in utterance_label['ph_dur'].split()],
-                    'spk_id': spk_id,
-                    'spk_name': self.speakers[ds_id],
+                    'ph_text': utterance_label['ph_seq'],
                 }
                 assert len(temp_dict['ph_seq']) == len(temp_dict['ph_dur']), \
                     f'Lengths of ph_seq and ph_dur mismatch in \'{item_name}\'.'
+                assert all(ph_dur >= 0 for ph_dur in temp_dict['ph_dur']), \
+                    f'Negative ph_dur found in \'{item_name}\'.'
                 meta_data_dict[f'{ds_id}:{item_name}'] = temp_dict
 
-        self.items.update(meta_data_dict)
+        return meta_data_dict
 
     @torch.no_grad()
     def process_item(self, item_name, meta_data, binarization_args):
@@ -87,7 +103,7 @@ class AcousticBinarizer(BaseBinarizer):
         mel = get_mel_torch(
             waveform, hparams['audio_sample_rate'], num_mel_bins=hparams['audio_num_mel_bins'],
             hop_size=hparams['hop_size'], win_size=hparams['win_size'], fft_size=hparams['fft_size'],
-            fmin=hparams['fmin'], fmax=hparams['fmax'], mel_base=hparams['mel_base'],
+            fmin=hparams['fmin'], fmax=hparams['fmax'],
             device=self.device
         )
         length = mel.shape[0]
@@ -100,8 +116,10 @@ class AcousticBinarizer(BaseBinarizer):
             'seconds': seconds,
             'length': length,
             'mel': mel,
-            'tokens': np.array(self.phone_encoder.encode(meta_data['ph_seq']), dtype=np.int64),
+            'languages': np.array(meta_data['lang_seq'], dtype=np.int64),
+            'tokens': np.array(meta_data['ph_seq'], dtype=np.int64),
             'ph_dur': np.array(meta_data['ph_dur']).astype(np.float32),
+            'ph_text': meta_data['ph_text'],
         }
 
         # get ground truth dur
@@ -138,15 +156,16 @@ class AcousticBinarizer(BaseBinarizer):
 
             processed_input['energy'] = energy.cpu().numpy()
 
-        # create a DeconstructedWaveform object for further feature extraction
+        # create a DecomposedWaveform object for further feature extraction
         dec_waveform = DecomposedWaveform(
             waveform, samplerate=hparams['audio_sample_rate'], f0=gt_f0 * ~uv,
-            hop_size=hparams['hop_size'], fft_size=hparams['fft_size'], win_size=hparams['win_size']
+            hop_size=hparams['hop_size'], fft_size=hparams['fft_size'], win_size=hparams['win_size'],
+            algorithm=hparams['hnsep']
         )
 
         if self.need_breathiness:
             # get ground truth breathiness
-            breathiness = get_breathiness_pyworld(
+            breathiness = get_breathiness(
                 dec_waveform, None, None, length=length
             )
 
@@ -161,7 +180,7 @@ class AcousticBinarizer(BaseBinarizer):
 
         if self.need_voicing:
             # get ground truth voicing
-            voicing = get_voicing_pyworld(
+            voicing = get_voicing(
                 dec_waveform, None, None, length=length
             )
 

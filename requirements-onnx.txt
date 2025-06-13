@@ -1,12 +1,12 @@
 # It is recommended to install PyTorch manually.
-# PyTorch >= 2.0 is recommended, but 1.12 and 1.13 is compatible.
-# See instructions at https://pytorch.org/get-started/locally/
+# PyTorch 1.13 is required for exporting ONNX models.
+# See instructions at https://pytorch.org/get-started/previous-versions/
 
 click
 einops>=0.7.0
 h5py
 librosa<0.10.0
-lightning~=2.3.0
+lightning~=2.1.0
 matplotlib
 MonkeyType==23.3.0
 numpy<2.0.0
@@ -19,5 +19,8 @@ resampy
 scipy>=1.10.0
 tensorboard
 tensorboardX
+torch==1.13.1
+torchvision==0.14.1
+torchaudio==0.13.1
 torchmetrics
 tqdm
