@@ -7,6 +7,29 @@ from modules.commons.rotary_embedding_torch import RotaryEmbedding, apply_rotary
 from modules.backbones.lynxnet import LYNXNetResidualLayer
 from utils.hparams import hparams
 
+class DropPath(nn.Module):
+    def __init__(self, drop_prob=0.1):
+        super().__init__()
+        self.drop_prob = drop_prob
+
+    def forward(self, x):
+        if not self.training or self.drop_prob == 0.0:
+            return x
+        keep_prob = 1 - self.drop_prob
+        shape = (x.shape[0],) + (1,) * (x.ndim - 1)
+        random_tensor = keep_prob + torch.rand(shape, dtype=x.dtype, device=x.device)
+        binary_tensor = torch.floor(random_tensor)
+        return x.div(keep_prob) * binary_tensor
+
+class ScaleNorm(nn.Module):
+    def __init__(self, dim, eps=1e-5):
+        super().__init__()
+        self.scale = nn.Parameter(torch.tensor(1.0))
+        self.eps = eps
+
+    def forward(self, x):
+        norm = torch.norm(x, dim=-1, keepdim=True)
+        return x * (self.scale / (norm + self.eps))
 
 class Transpose(nn.Module):
     def __init__(self, dims):
@@ -76,14 +99,15 @@ class DiTConVBlock(nn.Module):
     def __init__(self, dim: int, dim_cond: int, num_heads: int = 8, dropout: float = 0.1, use_rope: bool = False):
         super().__init__()
         self.dim = dim
-        self.norm1 = nn.LayerNorm(dim)
+        self.norm1 = ScaleNorm(dim)
         self.attn = MultiHeadAttention(dim, num_heads=num_heads, dropout=dropout, use_rope=use_rope)
-        self.norm2 = nn.LayerNorm(dim)
+        self.norm2 = ScaleNorm(dim)
         self.ffn = FFN(dim, dropout=dropout)
 
         self.cond_proj = nn.Conv1d(dim_cond, dim * 4, 1)
         self.diff_proj = nn.Linear(dim, dim * 4)
         self.layer_scale = nn.Parameter(1e-2 * torch.ones(dim))
+        self.drop_path = DropPath(0.1)
 
     def forward(self, x: torch.Tensor, cond: torch.Tensor, diffusion_step: torch.Tensor) -> torch.Tensor:
         # cond: [B, H, T], diffusion_step: [B, dim]
@@ -100,7 +124,7 @@ class DiTConVBlock(nn.Module):
         h = h * (1 + gamma2) + beta2
         h = self.ffn(h)
         h = h * self.layer_scale
-        x = x + 0.5 * h
+        x = x + self.drop_path(0.5 * h)
         return x
 
 class DiTLynxFusionBlock(nn.Module):
@@ -120,6 +144,7 @@ class DiTLynxFusionBlock(nn.Module):
             nn.GELU(),
             nn.Dropout(dropout)
         )
+        self.drop_path = DropPath(0.1)
 
     def forward(self, x: torch.Tensor, cond: torch.Tensor, diffusion_step: torch.Tensor) -> torch.Tensor:
         x_dit = self.dit_block(x, cond, diffusion_step)
@@ -128,8 +153,8 @@ class DiTLynxFusionBlock(nn.Module):
             cond,
             diffusion_step.unsqueeze(-1).repeat(1, 1, x.shape[1])
         ).transpose(1, 2)
-        x_fused = torch.cat([x_dit, x_lynx], dim=-1)
-        return self.fusion_proj(x_fused)
+        x_proj = self.fusion_proj(torch.cat([x_dit, x_lynx], dim=-1))
+        return x + self.drop_path(x_proj)
 
 class DiffusionTransformer(nn.Module):
     def __init__(self, in_dims: int, n_feats: int, *, num_layers: int = 6, num_channels: int = 512,
