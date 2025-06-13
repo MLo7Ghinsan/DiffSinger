@@ -169,15 +169,61 @@ class DiffusionTransformer(nn.Module):
             nn.GELU(),
             nn.Linear(num_channels * 4, num_channels),
         )
-        self.layers = nn.ModuleList([
-            DiTLynxFusionBlock(
-                dim=num_channels,
-                dim_cond=hparams['hidden_size'],
-                num_heads=num_heads,
-                dropout=dropout,
-                use_rope=use_rope
-            ) for _ in range(num_layers)
-        ])
+        self.layers = nn.ModuleList()
+        for i in range(num_layers):
+            if hparams.get("fusion_style", "parallel") == "parallel":
+                self.layers.append(
+                    DiTLynxFusionBlock(
+                        dim=num_channels,
+                        dim_cond=hparams['hidden_size'],
+                        num_heads=num_heads,
+                        dropout=dropout,
+                        use_rope=use_rope
+                    )
+                )
+            elif hparams["fusion_style"] == "alternate":
+                if i % 2 == 0:
+                    self.layers.append(
+                        DiTConVBlock(
+                            dim=num_channels,
+                            dim_cond=hparams['hidden_size'],
+                            num_heads=num_heads,
+                            dropout=dropout,
+                            use_rope=use_rope
+                        )
+                    )
+                else:
+                    self.layers.append(
+                        LYNXNetResidualLayer(
+                            dim_cond=hparams['hidden_size'],
+                            dim=num_channels,
+                            expansion_factor=1.5,
+                            kernel_size=15,
+                            activation='PReLU',
+                            dropout=dropout
+                        )
+                    )
+            elif hparams["fusion_style"] == "dit-only":
+                self.layers.append(
+                    DiTConVBlock(
+                        dim=num_channels,
+                        dim_cond=hparams['hidden_size'],
+                        num_heads=num_heads,
+                        dropout=dropout,
+                        use_rope=use_rope
+                    )
+                )
+            elif hparams["fusion_style"] == "lynx-only":
+                self.layers.append(
+                    LYNXNetResidualLayer(
+                        dim_cond=hparams['hidden_size'],
+                        dim=num_channels,
+                        expansion_factor=1.5,
+                        kernel_size=15,
+                        activation='PReLU',
+                        dropout=dropout
+                    )
+                )
         self.layer_norm = nn.LayerNorm(num_channels)
         self.output_projection = nn.Linear(num_channels, in_dims * n_feats)
         nn.init.xavier_uniform_(self.output_projection.weight)
@@ -193,7 +239,14 @@ class DiffusionTransformer(nn.Module):
         diffusion_step = self.mlp(diffusion_step) * 0.5 
 
         for i, layer in enumerate(self.layers):
-            x = layer(x, cond, diffusion_step)
+            if isinstance(layer, (DiTConVBlock, DiTLynxFusionBlock)):
+                x = layer(x, cond, diffusion_step)
+            elif isinstance(layer, LYNXNetResidualLayer):
+                x = layer(
+                    x.transpose(1, 2),
+                    cond,
+                    diffusion_step.unsqueeze(-1).repeat(1, 1, x.shape[1])
+                ).transpose(1, 2)
             if torch.isnan(x).any():
                 print(f"NaN detected after layer {i}")
                 break #debug
