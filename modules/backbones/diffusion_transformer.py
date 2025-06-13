@@ -19,10 +19,10 @@ class FFN(nn.Module):
     def __init__(self, dim: int, dropout: float = 0.0):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(dim, dim * 4),
-            nn.GELU(),
+            nn.Linear(dim, dim * 2),
+            nn.GLU(),
             nn.Dropout(dropout),
-            nn.Linear(dim * 4, dim),
+            nn.Linear(dim, dim),
             nn.Dropout(dropout),
         )
 
@@ -89,6 +89,7 @@ class DiTConVBlock(nn.Module):
 
         self.cond_proj = nn.Conv1d(dim_cond, dim * 4, 1)
         self.diff_proj = nn.Linear(dim, dim * 4)
+        self.layer_scale = nn.Parameter(1e-2 * torch.ones(dim))
 
     def forward(self, x: torch.Tensor, cond: torch.Tensor, diffusion_step: torch.Tensor) -> torch.Tensor:
         # cond: [B, H, T], diffusion_step: [B, dim]
@@ -104,7 +105,8 @@ class DiTConVBlock(nn.Module):
         h = self.norm2(x)
         h = h * (1 + gamma2) + beta2
         h = self.ffn(h)
-        x = x + h
+        h = h * self.layer_scale
+        x = x + 0.5 * h
         return x
 
 class DiffusionTransformer(nn.Module):
@@ -159,4 +161,3 @@ class DiffusionTransformer(nn.Module):
         else:
             x = x.reshape(-1, self.n_feats, self.in_dims, x.shape[2])
         return x
-
