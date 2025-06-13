@@ -1,6 +1,7 @@
 import torch.nn
 from modules.backbones.wavenet import WaveNet
 from modules.backbones.lynxnet import LYNXNet
+from modules.backbones.diffusion_transformer import DiffusionTransformer
 from utils import filter_kwargs
 
 BACKBONES = {
