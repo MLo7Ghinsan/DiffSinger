@@ -8,7 +8,8 @@ from torch import nn, einsum, broadcast_tensors, Tensor
 
 from einops import rearrange, repeat
 
-from typing import Literal
+from typing import Literal, Iterable
+from contextlib import contextmanager
 
 # helper functions
 
@@ -321,3 +322,16 @@ class RotaryEmbedding(Module):
             self.cached_freqs_seq_len = seq_len
 
         return freqs
+        
+@contextmanager
+def without_cache(modules: Iterable[nn.Module]):
+    #Temporarily disable rotary embedding caching for given modules 
+    rotaries = [m for module in modules for m in module.modules() if isinstance(m, RotaryEmbedding)]
+    prev = [r.cache_if_possible for r in rotaries]
+    try:
+        for r in rotaries:
+            r.cache_if_possible = False
+        yield
+    finally:
+        for r, val in zip(rotaries, prev):
+            r.cache_if_possible = val
