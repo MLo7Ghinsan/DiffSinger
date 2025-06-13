@@ -5,7 +5,8 @@ from utils import filter_kwargs
 
 BACKBONES = {
     'wavenet': WaveNet,
-    'lynxnet': LYNXNet
+    'lynxnet': LYNXNet,
+    'diffusion_transformer': DiffusionTransformer
 }
 
 
