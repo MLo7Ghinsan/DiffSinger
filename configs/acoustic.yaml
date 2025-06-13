@@ -73,12 +73,13 @@ hidden_size: 256
 
 backbone_type: 'diffusion_transformer'
 backbone_args:
-  num_layers: 6
-  num_channels: 512
-  num_heads: 8
+  num_layers: 4
+  num_channels: 384
+  num_heads: 6
   ffn_kernel_size: 3
   dropout: 0.1
   use_rope: true
+  use_lynx: true
   
 #backbone_type: 'lynxnet'
 #backbone_args:
