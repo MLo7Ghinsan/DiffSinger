@@ -141,6 +141,7 @@ class PNet(nn.Module):
         else:
             x = x.reshape(-1, self.n_feats, self.in_dims, T)
 
-        note_midi_residual = self.note_res_proj(note_midi).transpose(1, 2)
-        x = x + note_midi_residual.transpose(1, 2)
+        note_midi_residual = self.note_res_proj(note_midi)
+        note_midi_residual = note_midi_residual.reshape(B, self.n_feats, self.in_dims, T)
+        x = x + note_midi_residual
         return x
