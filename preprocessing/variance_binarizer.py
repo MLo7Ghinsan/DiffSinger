@@ -396,12 +396,12 @@ class VarianceBinarizer(BaseBinarizer):
         smoothed_f0 = self.extract_smoothed_f0(f0_hz, sr=100, cutoff=vibrato_cutoff)
         vibrato_likelihood = self.extract_vibrato_likelihood(smoothed_f0, sr=100)
         vibrato_flags, m_a, m_f = self.extract_vibrato_parameters(smoothed_f0, vibrato_likelihood, sr=100)
-
         vibrato_f0 = self.gen_sine_vibrato(frame_note_hz.copy(), sr=100, m_a=m_a, m_f=m_f, scale=vibrato_scale)
 
         f0_hz_corrected = np.copy(f0_hz)
         note_ids = mel2note.cpu().numpy()
         num_notes = note_midi.shape[0]
+
         for note_id in range(num_notes):
             mask = note_ids == note_id
             if not mask.any():
@@ -409,26 +409,33 @@ class VarianceBinarizer(BaseBinarizer):
             idx = np.where(mask)[0]
             if len(idx) < 2:
                 continue
+
             start, end = idx[0], idx[-1]
             length = end - start + 1
-            margin_len = int(length * portamento_margin)
-            if margin_len == 0:
-                margin_len = 1
-            mid_slice = slice(start + margin_len, end - margin_len + 1)
-            center_modeled = vibrato_f0[mid_slice]
-            for i in range(margin_len):
-                alpha = 0.5 * (1 - np.cos(np.pi * (i / margin_len))) # cosine ramp
-                f0_hz_corrected[start + i] = (
-                    f0_hz[start + i] * (1 - alpha) + vibrato_f0[start + i] * alpha
-                )
-            for i in range(margin_len):
-                alpha = 0.5 * (1 - np.cos(np.pi * (i / margin_len)))
-                f0_hz_corrected[end - i] = (
-                    f0_hz[end - i] * (1 - alpha) + vibrato_f0[end - i] * alpha
-                )
-            if mid_slice.start <= mid_slice.stop:
-                f0_hz_corrected[mid_slice] = center_modeled
-        return np.nan_to_num(f0_hz_corrected, nan=0.0, posin
+            margin_len = max(int(length * portamento_margin), 1)
+            blend_len = min(4, margin_len)
+
+            mid_start = start + margin_len
+            mid_end = end - margin_len + 1
+
+            for i in range(blend_len):
+                alpha = 0.5 * (1 - np.cos(np.pi * (i / blend_len)))
+                idx_blend = mid_start + i
+                if idx_blend <= end:
+                    f0_hz_corrected[idx_blend] = (
+                        f0_hz[idx_blend] * (1 - alpha) + vibrato_f0[idx_blend] * alpha
+                    )
+            for i in range(blend_len):
+                alpha = 0.5 * (1 - np.cos(np.pi * (i / blend_len)))
+                idx_blend = mid_end - 1 - i
+                if idx_blend >= start:
+                    f0_hz_corrected[idx_blend] = (
+                        f0_hz[idx_blend] * (1 - alpha) + vibrato_f0[idx_blend] * alpha
+                    )
+            if mid_end > mid_start:
+                center_slice = slice(mid_start + blend_len, mid_end - blend_len)
+                f0_hz_corrected[center_slice] = vibrato_f0[center_slice]
+        return np.nan_to_num(f0_hz_corrected, nan=0.0, posinf=0.0, neginf=0.0)
 
     def load_attr_from_ds(self, ds_id, name, attr, idx=0):
         item_name = f'{ds_id}:{name}'
