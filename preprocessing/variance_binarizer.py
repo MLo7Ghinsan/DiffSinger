@@ -86,9 +86,9 @@ class VarianceBinarizer(BaseBinarizer):
         self.cached_ds = {}
 
     # from https://github.com/nnsvs/nnsvs/blob/master/nnsvs/dsp.py
-    def lowpass_filter(self, x, fs, cutoff=5, N=5):
+    def lowpass_filter(self, x, sr, cutoff=5, N=5):
         """Lowpass filter"""
-        nyquist = fs // 2
+        nyquist = sr // 2
         norm_cutoff = cutoff / nyquist
         b, a = signal.butter(N, norm_cutoff, btype="low")
         if len(x) <= max(len(a), len(b)) * (N // 2 + 1):
@@ -98,9 +98,10 @@ class VarianceBinarizer(BaseBinarizer):
     # attempt to pitch correction (pitch modeling) as in nnsvs pitch.py
     def apply_pitch_modeling(self, f0_hz: np.ndarray, note_midi: np.ndarray, mel2note: torch.Tensor) -> np.ndarray:
         note_hz = librosa.midi_to_hz(note_midi)
+        note_hz_tensor = torch.from_numpy(note_hz).to(mel2note.device)
         frame_note_hz = torch.gather(
-            F.pad(torch.from_numpy(note_hz), [1, 0], value=0), 0, mel2note
-        ).numpy()
+            F.pad(note_hz_tensor, [1, 0], value=0), 0, mel2note
+        ).cpu().numpy()
     
         valid = (f0_hz > 0) & (frame_note_hz > 0)
         if valid.sum() == 0:
@@ -382,6 +383,8 @@ class VarianceBinarizer(BaseBinarizer):
                 [(librosa.note_to_midi(n, round_midi=False) if n != 'rest' else -1) for n in meta_data['note_seq']],
                 dtype=np.float32
             )
+            if hparams['use_midi_correction']:
+                note_midi = np.where(note_midi >= 0, np.round(note_midi), note_midi)
             note_rest = note_midi < 0
             interp_func = interpolate.interp1d(
                 np.where(~note_rest)[0], note_midi[~note_rest],
