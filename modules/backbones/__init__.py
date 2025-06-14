@@ -2,12 +2,14 @@ import torch.nn
 from modules.backbones.wavenet import WaveNet
 from modules.backbones.lynxnet import LYNXNet
 from modules.backbones.diffusion_transformer import DiffusionTransformer
+from modules.backbones.pnet import PNet
 from utils import filter_kwargs
 
 BACKBONES = {
     'wavenet': WaveNet,
     'lynxnet': LYNXNet,
-    'diffusion_transformer': DiffusionTransformer
+    'diffusion_transformer': DiffusionTransformer,
+    'pnet': PNet
 }
 
 
