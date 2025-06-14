@@ -418,15 +418,13 @@ class VarianceBinarizer(BaseBinarizer):
             center_modeled = vibrato_f0[mid_slice]
             for i in range(margin_len):
                 alpha = 0.5 * (1 - np.cos(np.pi * (i / margin_len))) # cosine ramp
-                f0_hz_corrected[start + i] = (
-                    f0_hz[start + i] * (1 - alpha) + vibrato_f0[start + i] * alpha
-                )
+                idx = start + margin_len - i - 1 # Start from the *end* of the margin
+                f0_hz_corrected[idx] = f0_hz[idx] * (1 - alpha) + vibrato_f0[idx] * alpha
             for i in range(margin_len):
                 alpha = 0.5 * (1 - np.cos(np.pi * (i / margin_len)))
-                f0_hz_corrected[end - i] = (
-                    f0_hz[end - i] * (1 - alpha) + vibrato_f0[end - i] * alpha
-                )
-            if mid_slice.start <= mid_slice.stop:
+                idx = end - margin_len + 1 + i # Start from the *start* of the margin
+                f0_hz_corrected[idx] = f0_hz[idx] * (1 - alpha) + vibrato_f0[idx] * alpha
+            if mid_slice.stop > mid_slice.start:
                 f0_hz_corrected[mid_slice] = center_modeled
         return np.nan_to_num(f0_hz_corrected, nan=0.0, posinf=0.0, neginf=0.0)
 
