@@ -89,8 +89,8 @@ pitch_prediction_args:
     fusion_style: 'parallel'  # options: 'parallel', 'alternate', 'dit-only', 'lynx-only'
 use_pitch_modeling: true # pitch modeling toggle
 use_midi_correction: true # midi correction from off cents to on pitch
-pitch_modeling_portamento_margin: 0.20 # portamento pitch preservation calculate from note's length at the beginning and end of the note
-vibrato_smoothing_cutoff: 8 # vibrato detection sensitivity in hz
+pitch_modeling_portamento_margin: 0.30 # portamento pitch preservation calculate from note's length at the beginning and end of the note
+vibrato_smoothing_cutoff: 5 # vibrato detection sensitivity in hz
 vibrato_scale: 1.0 # scale modeled vibrato. 1< for smaller vibrato, >1 for bigger vibrato, 1 for no scaling (using the original detected value)
 
 energy_db_min: -96.0
