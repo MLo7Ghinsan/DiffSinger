@@ -88,8 +88,9 @@ pitch_prediction_args:
     use_lynx: true
     fusion_style: 'parallel'  # options: 'parallel', 'alternate', 'dit-only', 'lynx-only'
 use_pitch_modeling: true
-pitch_correction_max_cent: 100
-pitch_correction_outlier_threshold: 200
+use_midi_correction: true
+pitch_correction_max_cent: 150
+pitch_correction_outlier_threshold: 300
 vibrato_smoothing_cutoff: 8
 
 energy_db_min: -96.0
