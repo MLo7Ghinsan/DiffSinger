@@ -119,12 +119,14 @@ class DiTConVBlock(nn.Module):
         h = h * (1 + gamma1) + beta1
         h = self.attn(h)
         x = x + h
+        x = torch.nan_to_num(x, nan=0.0, posinf=1e4, neginf=-1e4)
 
         h = self.norm2(x)
         h = h * (1 + gamma2) + beta2
         h = self.ffn(h)
         h = h * self.layer_scale
         x = x + self.drop_path(0.5 * h)
+        x = torch.nan_to_num(x, nan=0.0, posinf=1e4, neginf=-1e4)
         return x
 
 class DiTLynxFusionBlock(nn.Module):
@@ -154,7 +156,9 @@ class DiTLynxFusionBlock(nn.Module):
             diffusion_step.unsqueeze(-1).repeat(1, 1, x.shape[1])
         ).transpose(1, 2)
         x_proj = self.fusion_proj(torch.cat([x_dit, x_lynx], dim=-1))
-        return x + self.drop_path(x_proj)
+        x = x + self.drop_path(x_proj)
+        x = torch.nan_to_num(x, nan=0.0, posinf=1e4, neginf=-1e4)
+        return x
 
 class DiffusionTransformer(nn.Module):
     def __init__(self, in_dims: int, n_feats: int, *, num_layers: int = 6, num_channels: int = 512,
@@ -229,6 +233,9 @@ class DiffusionTransformer(nn.Module):
         nn.init.xavier_uniform_(self.output_projection.weight)
 
     def forward(self, spec: torch.Tensor, diffusion_step: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+        spec = torch.nan_to_num(spec, nan=0.0, posinf=1e4, neginf=-1e4)
+        cond = torch.nan_to_num(cond, nan=0.0, posinf=1e4, neginf=-1e4)
+        diffusion_step = torch.nan_to_num(diffusion_step, nan=0.0, posinf=1e4, neginf=-1e4)
         if self.n_feats == 1:
             x = spec[:, 0].transpose(1, 2)
         else:
@@ -237,6 +244,7 @@ class DiffusionTransformer(nn.Module):
 
         diffusion_step = self.diffusion_embedding(diffusion_step)
         diffusion_step = self.mlp(diffusion_step) * 0.5 
+        diffusion_step = torch.clamp(diffusion_step, -5.0, 5.0)
 
         for i, layer in enumerate(self.layers):
             if isinstance(layer, (DiTConVBlock, DiTLynxFusionBlock)):
