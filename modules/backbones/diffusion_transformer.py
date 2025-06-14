@@ -7,13 +7,15 @@ from modules.commons.rotary_embedding_torch import RotaryEmbedding, apply_rotary
 from modules.backbones.lynxnet import LYNXNetResidualLayer
 from utils.hparams import hparams
 
+IS_EXPORT = torch.onnx.is_in_onnx_export
+
 class DropPath(nn.Module):
     def __init__(self, drop_prob=0.1):
         super().__init__()
         self.drop_prob = drop_prob
 
     def forward(self, x):
-        if not self.training or self.drop_prob == 0.0:
+        if not self.training or self.drop_prob == 0.0 or IS_EXPORT():
             return x
         keep_prob = 1 - self.drop_prob
         shape = (x.shape[0],) + (1,) * (x.ndim - 1)
@@ -79,7 +81,7 @@ class MultiHeadAttention(nn.Module):
         k = k.view(b, t, self.num_heads, self.head_dim).transpose(1, 2)
         v = v.view(b, t, self.num_heads, self.head_dim).transpose(1, 2)
 
-        if self.use_rope:
+        if self.use_rope and not IS_EXPORT():
             pos = torch.arange(t, device=x.device, dtype=x.dtype)
             freqs = self.rotary(pos, seq_len=t)
             freqs = freqs.unsqueeze(0).unsqueeze(0)  # [1,1,t,d]
@@ -119,14 +121,14 @@ class DiTConVBlock(nn.Module):
         h = h * (1 + gamma1) + beta1
         h = self.attn(h)
         x = x + h
-        x = torch.nan_to_num(x, nan=0.0, posinf=1e4, neginf=-1e4)
+        x = torch.clamp(x, -1e4, 1e4)
 
         h = self.norm2(x)
         h = h * (1 + gamma2) + beta2
         h = self.ffn(h)
         h = h * self.layer_scale
         x = x + self.drop_path(0.5 * h)
-        x = torch.nan_to_num(x, nan=0.0, posinf=1e4, neginf=-1e4)
+        x = torch.clamp(x, -1e4, 1e4)
         return x
 
 class DiTLynxFusionBlock(nn.Module):
@@ -153,11 +155,11 @@ class DiTLynxFusionBlock(nn.Module):
         x_lynx = self.lynx_block(
             x.transpose(1, 2),
             cond,
-            diffusion_step.unsqueeze(-1).repeat(1, 1, x.shape[1])
+            diffusion_step.unsqueeze(-1).expand(-1, -1, x.shape[1])
         ).transpose(1, 2)
         x_proj = self.fusion_proj(torch.cat([x_dit, x_lynx], dim=-1))
         x = x + self.drop_path(x_proj)
-        x = torch.nan_to_num(x, nan=0.0, posinf=1e4, neginf=-1e4)
+        x = torch.clamp(x, -1e4, 1e4)
         return x
 
 class DiffusionTransformer(nn.Module):
@@ -233,13 +235,10 @@ class DiffusionTransformer(nn.Module):
         nn.init.xavier_uniform_(self.output_projection.weight)
 
     def forward(self, spec: torch.Tensor, diffusion_step: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
-        spec = torch.nan_to_num(spec, nan=0.0, posinf=1e4, neginf=-1e4)
-        cond = torch.nan_to_num(cond, nan=0.0, posinf=1e4, neginf=-1e4)
-        diffusion_step = torch.nan_to_num(diffusion_step, nan=0.0, posinf=1e4, neginf=-1e4)
-        if self.n_feats == 1:
-            x = spec[:, 0].transpose(1, 2)
-        else:
-            x = spec.flatten(start_dim=1, end_dim=2).transpose(1, 2)
+        spec = torch.clamp(spec, -1e4, 1e4)
+        cond = torch.clamp(cond, -1e4, 1e4)
+        diffusion_step = torch.clamp(diffusion_step, -1e4, 1e4)
+        x = spec.flatten(start_dim=1, end_dim=2).transpose(1, 2)
         x = self.input_projection(x)
 
         diffusion_step = self.diffusion_embedding(diffusion_step)
@@ -253,18 +252,15 @@ class DiffusionTransformer(nn.Module):
                 x = layer(
                     x.transpose(1, 2),
                     cond,
-                    diffusion_step.unsqueeze(-1).repeat(1, 1, x.shape[1])
+                    diffusion_step.unsqueeze(-1).expand(-1, -1, x.shape[1])
                 ).transpose(1, 2)
-            if torch.isnan(x).any():
-                print(f"NaN detected after layer {i}")
-                break #debug
+            #if torch.isnan(x).any():
+            #    print(f"NaN detected after layer {i}")
+            #    break #debug
 
         x = self.layer_norm(x)
         x = self.output_projection(x)
         x = x.transpose(1, 2)
 
-        if self.n_feats == 1:
-            x = x[:, None, :, :]
-        else:
-            x = x.reshape(-1, self.n_feats, self.in_dims, x.shape[2])
+        x = x.reshape(-1, self.n_feats, self.in_dims, x.shape[2])
         return x
