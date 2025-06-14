@@ -57,11 +57,13 @@ class GlobalSelfAttention(nn.Module):
 
 
 class PNet(nn.Module):
-    def __init__(self, in_dims, n_feats, num_layers=6, num_channels=256, use_vibrato_hint=True):
+    def __init__(self, in_dims, n_feats, *, num_layers=None, num_channels=None):
         super().__init__()
         self.in_dims = in_dims
         self.n_feats = n_feats
-        self.use_vibrato_hint = use_vibrato_hint
+
+        num_layers = num_layers or hparams['num_layers']
+        num_channels = num_channels or hparams['hidden_size']
 
         self.input_projection = nn.Linear(in_dims * n_feats, num_channels)
 
@@ -78,20 +80,21 @@ class PNet(nn.Module):
         self.deviation_proj = nn.Conv1d(1, num_channels, 1)
         # residual projection to match output dims
         self.note_res_proj = nn.Conv1d(1, in_dims * n_feats, 1)
-
+        kernel_size = hparams['ffn_kernel_size']
+        dropout = hparams['dropout']
+        
         self.conv_blocks = nn.ModuleList([
-            ConvBlock(num_channels, kernel_size=5, dropout=0.1)
+            ConvBlock(num_channels, kernel_size=kernel_size, dropout=dropout)
             for _ in range(num_layers // 2)
         ])
 
-        self.global_attn = GlobalSelfAttention(num_channels)
+        self.global_attn = GlobalSelfAttention(num_channels, heads=hparams['num_heads'], dropout=dropout)
 
         self.norm = nn.LayerNorm(num_channels)
         self.output_projection = nn.Linear(num_channels, in_dims * n_feats)
         nn.init.xavier_uniform_(self.output_projection.weight)
 
-        if self.use_vibrato_hint:
-            self.vibrato_proj = nn.Conv1d(2, num_channels, 1)
+        self.vibrato_proj = nn.Conv1d(2, num_channels, 1)
 
     def forward(self, spec: torch.Tensor, diffusion_step: torch.Tensor, cond: torch.Tensor, vibrato_hint: torch.Tensor = None) -> torch.Tensor:
         """Forward pass.
