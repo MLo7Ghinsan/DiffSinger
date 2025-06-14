@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from modules.commons.common_layers import SinusoidalPosEmb
+from modules.commons.rotary_embedding_torch import RotaryEmbedding, apply_rotary_emb
 from utils.hparams import hparams
 
 
@@ -10,6 +11,7 @@ class ConvBlock(nn.Module):
     """Depthwise separable convolution block with GLU."""
     def __init__(self, channels, kernel_size=5, dropout=0.1):
         super().__init__()
+        self.norm = nn.LayerNorm(channels)
         self.conv = nn.Conv1d(
             channels,
             channels * 2,
@@ -18,13 +20,12 @@ class ConvBlock(nn.Module):
             groups=channels
         )
         self.dropout = nn.Dropout(dropout)
-        self.norm = nn.LayerNorm(channels)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward with [B, C, T] tensor."""
+        x = self.norm(x.transpose(1, 2)).transpose(1, 2)
         x = self.conv(x)
         x = F.glu(x, dim=1)
-        x = self.norm(x.transpose(1, 2)).transpose(1, 2)
         x = self.dropout(x)
         return x
 
@@ -36,24 +37,28 @@ class FiLMLayer(nn.Module):
 
     def forward(self, x, cond):
         gamma, beta = self.linear(cond).chunk(2, dim=-1)
-        x = x * (1 + gamma.unsqueeze(1)) + beta.unsqueeze(1)
-        return x
+        return x * (1 + gamma.unsqueeze(1)) + beta.unsqueeze(1)
 
 
 class GlobalSelfAttention(nn.Module):
     def __init__(self, dim, heads=4, dropout=0.1):
         super().__init__()
-        self.attn = nn.MultiheadAttention(
-            embed_dim=dim, num_heads=heads, dropout=dropout, batch_first=True
-        )
         self.norm = nn.LayerNorm(dim)
+        self.attn = nn.MultiheadAttention(embed_dim=dim, num_heads=heads, dropout=dropout, batch_first=True)
         self.dropout = nn.Dropout(dropout)
+        self.rotary = RotaryEmbedding(dim // heads)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        residual = x
+    def forward(self, x):
         x = self.norm(x)
-        x, _ = self.attn(x, x, x, need_weights=False)
-        return residual + self.dropout(x)
+        b, t, d = x.shape
+        h = self.attn.num_heads
+        qkv = x.view(b, t, h, -1).transpose(1, 2)
+        pos = torch.arange(t, device=x.device, dtype=x.dtype)
+        freqs = self.rotary(pos, seq_len=t).unsqueeze(0).unsqueeze(0)
+        qkv = apply_rotary_emb(freqs, qkv, seq_dim=2)
+        x = qkv.transpose(1, 2).reshape(b, t, d)
+        out, _ = self.attn(x, x, x, need_weights=False)
+        return x + self.dropout(out)
 
 
 class PNet(nn.Module):
@@ -74,15 +79,18 @@ class PNet(nn.Module):
             nn.Linear(num_channels * 4, num_channels),
         )
 
-        self.film = FiLMLayer(num_channels)
+        self.film_layers = nn.ModuleList([
+            FiLMLayer(num_channels) for _ in range(num_layers // 2)
+        ])
 
         self.note_proj = nn.Conv1d(1, num_channels, 1)
         self.deviation_proj = nn.Conv1d(1, num_channels, 1)
         # residual projection to match output dims
         self.note_res_proj = nn.Conv1d(1, in_dims * n_feats, 1)
+        self.vibrato_proj = nn.Conv1d(2, num_channels, 1)
         kernel_size = hparams['ffn_kernel_size']
         dropout = hparams['dropout']
-        
+
         self.conv_blocks = nn.ModuleList([
             ConvBlock(num_channels, kernel_size=kernel_size, dropout=dropout)
             for _ in range(num_layers // 2)
@@ -90,15 +98,14 @@ class PNet(nn.Module):
 
         self.global_attn = GlobalSelfAttention(num_channels, heads=hparams['num_heads'], dropout=dropout)
 
+        self.mix_proj = nn.Conv1d(num_channels, num_channels, 1)
+
         self.norm = nn.LayerNorm(num_channels)
         self.output_projection = nn.Linear(num_channels, in_dims * n_feats)
         nn.init.xavier_uniform_(self.output_projection.weight)
 
-        self.vibrato_proj = nn.Conv1d(2, num_channels, 1)
-
     def forward(self, spec: torch.Tensor, diffusion_step: torch.Tensor, cond: torch.Tensor, vibrato_hint: torch.Tensor = None) -> torch.Tensor:
         """Forward pass.
-
         Args:
             spec: [B, F, M, T]
             diffusion_step: [B, 1]
@@ -110,6 +117,12 @@ class PNet(nn.Module):
         pitch_deviation = spec[:, 0, 0, :] - note_midi[:, 0, :]
         pitch_deviation = pitch_deviation.unsqueeze(1)
 
+        if self.training and torch.rand(1).item() < 0.1:
+            cond = cond.clone()
+            cond[:, :1, :] = 0
+            if vibrato_hint is not None:
+                vibrato_hint = vibrato_hint * 0
+
         if self.n_feats == 1:
             x = spec[:, 0].transpose(1, 2)
         else:
@@ -120,20 +133,22 @@ class PNet(nn.Module):
         diffusion_step = self.mlp(diffusion_step)
         diffusion_step = torch.clamp(diffusion_step, -5.0, 5.0)
 
-        x = self.film(x, diffusion_step)
+        x = self.film_layers[0](x, diffusion_step)
 
         x = x + self.note_proj(note_midi).transpose(1, 2)
         x = x + self.deviation_proj(pitch_deviation).transpose(1, 2)
 
-        if self.use_vibrato_hint and vibrato_hint is not None:
-            vib = self.vibrato_proj(vibrato_hint)
-            vib = vib.transpose(1, 2)
+        if vibrato_hint is not None:
+            vib = self.vibrato_proj(vibrato_hint).transpose(1, 2)
             x = x + vib
 
-        for block in self.conv_blocks:
+        for i, block in enumerate(self.conv_blocks):
             x = x + block(x.transpose(1, 2)).transpose(1, 2)
+            if i + 1 < len(self.film_layers):
+                x = self.film_layers[i + 1](x, diffusion_step)
 
         x = self.global_attn(x)
+        x = self.mix_proj(x.transpose(1, 2)).transpose(1, 2)
 
         x = self.norm(x)
         x = self.output_projection(x)
