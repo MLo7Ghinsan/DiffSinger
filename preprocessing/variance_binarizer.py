@@ -389,7 +389,8 @@ class VarianceBinarizer(BaseBinarizer):
         if valid.sum() == 0:
             return f0_hz
 
-        portamento_margin = hparams['pitch_modeling_portamento_margin']
+        portamento_margin_b = hparams['portamento_margin_beginning']
+        portamento_margin_e = hparams['portamento_margin_end']
         vibrato_cutoff = hparams['vibrato_smoothing_cutoff']
         vibrato_scale = hparams['vibrato_scale']
 
@@ -412,11 +413,14 @@ class VarianceBinarizer(BaseBinarizer):
 
             start, end = idx[0], idx[-1]
             length = end - start + 1
-            margin_len = max(int(length * portamento_margin), 1)
-            blend_len = min(4, margin_len)
 
-            mid_start = start + margin_len
-            mid_end = end - margin_len + 1
+            margin_len_start = max(int(length * portamento_margin_b), 1)
+            margin_len_end = max(int(length * portamento_margin_e), 1)
+
+            blend_len = min(4, margin_len_start, margin_len_end)
+
+            mid_start = start + margin_len_start
+            mid_end = end - margin_len_end + 1
 
             for i in range(blend_len):
                 alpha = 0.5 * (1 - np.cos(np.pi * (i / blend_len)))
