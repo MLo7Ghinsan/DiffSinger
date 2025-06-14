@@ -62,13 +62,21 @@ class GlobalSelfAttention(nn.Module):
 
 
 class PNet(nn.Module):
-    def __init__(self, in_dims, n_feats, *, num_layers=None, num_channels=None):
+    def __init__(self, in_dims, n_feats, *, num_layers=None, num_channels=None,
+                 num_heads=None, dropout=None, ffn_kernel_size=None):
         super().__init__()
         self.in_dims = in_dims
         self.n_feats = n_feats
 
         num_layers = num_layers or hparams['num_layers']
         num_channels = num_channels or hparams['hidden_size']
+        num_heads = num_heads or hparams['num_heads']
+        dropout = hparams['dropout'] if dropout is None else dropout
+        ffn_kernel_size = (
+            ffn_kernel_size
+            if ffn_kernel_size is not None
+            else hparams.get('ffn_kernel_size', hparams.get('enc_ffn_kernel_size'))
+        )
 
         self.input_projection = nn.Linear(in_dims * n_feats, num_channels)
 
@@ -88,15 +96,14 @@ class PNet(nn.Module):
         # residual projection to match output dims
         self.note_res_proj = nn.Conv1d(1, in_dims * n_feats, 1)
         self.vibrato_proj = nn.Conv1d(2, num_channels, 1)
-        kernel_size = hparams['ffn_kernel_size']
-        dropout = hparams['dropout']
+        kernel_size = ffn_kernel_size
 
         self.conv_blocks = nn.ModuleList([
             ConvBlock(num_channels, kernel_size=kernel_size, dropout=dropout)
             for _ in range(num_layers // 2)
         ])
 
-        self.global_attn = GlobalSelfAttention(num_channels, heads=hparams['num_heads'], dropout=dropout)
+        self.global_attn = GlobalSelfAttention(num_channels, heads=num_heads, dropout=dropout)
 
         self.mix_proj = nn.Conv1d(num_channels, num_channels, 1)
 
