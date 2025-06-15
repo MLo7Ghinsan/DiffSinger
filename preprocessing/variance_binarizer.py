@@ -729,7 +729,7 @@ class VarianceBinarizer(BaseBinarizer):
             )
             processed_input['mel2note'] = mel2note.cpu().numpy()
             if hparams['use_pitch_modeling']:
-                mode = 'shift_to_note'
+                mode = 'default'
                 f0 = self.apply_pitch_modeling(
                     f0, note_midi.cpu().numpy(), mel2note, mode=mode
                 )
