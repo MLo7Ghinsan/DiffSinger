@@ -380,7 +380,7 @@ class VarianceBinarizer(BaseBinarizer):
         return f0_gen
 
     # attempt to pitch modeling as in nnsvs pitch.py
-    def apply_pitch_modeling(self, f0_hz: np.ndarray, note_midi: np.ndarray, mel2note: torch.Tensor) -> np.ndarray:
+    def apply_pitch_modeling(self, f0_hz: np.ndarray, note_midi: np.ndarray, mel2note: torch.Tensor, mode: str = "default") -> np.ndarray:
         note_hz = librosa.midi_to_hz(note_midi)
         note_hz_tensor = torch.from_numpy(note_hz).to(mel2note.device)
         frame_note_hz = torch.gather(F.pad(note_hz_tensor, [1, 0], value=0), 0, mel2note).cpu().numpy()
@@ -410,35 +410,49 @@ class VarianceBinarizer(BaseBinarizer):
             idx = np.where(mask)[0]
             if len(idx) < 2:
                 continue
-
+    
             start, end = idx[0], idx[-1]
             length = end - start + 1
-
+    
             margin_len_start = max(int(length * portamento_margin_b), 1)
             margin_len_end = max(int(length * portamento_margin_e), 1)
-
+    
             blend_len = min(4, margin_len_start, margin_len_end)
-
+    
             mid_start = start + margin_len_start
             mid_end = end - margin_len_end + 1
-
-            for i in range(blend_len):
-                alpha = 0.5 * (1 - np.cos(np.pi * (i / blend_len)))
-                idx_blend = mid_start + i
-                if idx_blend <= end:
-                    f0_hz_corrected[idx_blend] = (
-                        f0_hz[idx_blend] * (1 - alpha) + vibrato_f0[idx_blend] * alpha
-                    )
-            for i in range(blend_len):
-                alpha = 0.5 * (1 - np.cos(np.pi * (i / blend_len)))
-                idx_blend = mid_end - 1 - i
-                if idx_blend >= start:
-                    f0_hz_corrected[idx_blend] = (
-                        f0_hz[idx_blend] * (1 - alpha) + vibrato_f0[idx_blend] * alpha
-                    )
-            if mid_end > mid_start:
-                center_slice = slice(mid_start + blend_len, mid_end - blend_len)
+    
+            if mid_end <= mid_start:
+                continue
+    
+            center_slice = slice(mid_start + blend_len, mid_end - blend_len)
+    
+            if mode == "default":
+                for i in range(blend_len):
+                    alpha = 0.5 * (1 - np.cos(np.pi * (i / blend_len)))
+                    idx_blend = mid_start + i
+                    if idx_blend <= end:
+                        f0_hz_corrected[idx_blend] = (
+                            f0_hz[idx_blend] * (1 - alpha) + vibrato_f0[idx_blend] * alpha
+                        )
+                for i in range(blend_len):
+                    alpha = 0.5 * (1 - np.cos(np.pi * (i / blend_len)))
+                    idx_blend = mid_end - 1 - i
+                    if idx_blend >= start:
+                        f0_hz_corrected[idx_blend] = (
+                            f0_hz[idx_blend] * (1 - alpha) + vibrato_f0[idx_blend] * alpha
+                        )
                 f0_hz_corrected[center_slice] = vibrato_f0[center_slice]
+    
+            elif mode == "shift_to_note":
+                original_center = np.mean(f0_hz[center_slice])
+                target_pitch = note_hz[note_id]
+                offset = target_pitch - original_center
+                f0_hz_corrected[center_slice] = f0_hz[center_slice] + offset
+    
+            else:
+                raise ValueError(f"Unknown pitch modeling mode: {mode}")
+    
         return np.nan_to_num(f0_hz_corrected, nan=0.0, posinf=0.0, neginf=0.0)
 
     def load_attr_from_ds(self, ds_id, name, attr, idx=0):
@@ -715,8 +729,9 @@ class VarianceBinarizer(BaseBinarizer):
             )
             processed_input['mel2note'] = mel2note.cpu().numpy()
             if hparams['use_pitch_modeling']:
+                mode = 'shift_to_note'
                 f0 = self.apply_pitch_modeling(
-                    f0, note_midi.cpu().numpy(), mel2note
+                    f0, note_midi.cpu().numpy(), mel2note, mode=mode
                 )
                 uv = f0 == 0
                 f0, _ = interp_f0(f0, uv)
