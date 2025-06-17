@@ -194,13 +194,13 @@ class VarianceBinarizer(BaseBinarizer):
                     win_end = min(i + half_win, len(f0_filled))
                     f0_window = f0_filled[win_start:win_end]
 
-                    result = self.detect_vibrato_params(f0_window, frame_rate=frame_rate, debug=True)
+                    result = self.detect_vibrato_params(f0_window, frame_rate=frame_rate, debug=False)
                     if result is not None:
                         vib_start = i
                         rate, depth = result
                         while i < mid_end - blend_len:
                             next_win = f0_filled[max(i - half_win, 0):min(i + half_win, len(f0_filled))]
-                            next_result = self.detect_vibrato_params(next_win, frame_rate=frame_rate, debug=True)
+                            next_result = self.detect_vibrato_params(next_win, frame_rate=frame_rate, debug=False)
                             if next_result is None:
                                 break
                             i += 1
