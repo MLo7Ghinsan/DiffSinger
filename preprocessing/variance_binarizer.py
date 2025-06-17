@@ -8,7 +8,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from scipy import interpolate, signal
-from scipy.signal import argrelmax, argrelmin
+from scipy.signal import argrelmax, argrelmin, find_peaks
 
 from basics.base_binarizer import BaseBinarizer, BinarizationError
 from basics.base_pe import BasePE
@@ -88,298 +88,39 @@ class VarianceBinarizer(BaseBinarizer):
         self.prefer_ds = self.binarization_args['prefer_ds']
         self.cached_ds = {}
 
-    # from https://github.com/nnsvs/nnsvs/blob/master/nnsvs/dsp.py
-    def lowpass_filter(self, x, sr, cutoff=5, N=5):
-        """Lowpass filter"""
-        nyquist = sr // 2
-        norm_cutoff = cutoff / nyquist
-        b, a = signal.butter(N, norm_cutoff, btype="low")
-        if len(x) <= max(len(a), len(b)) * (N // 2 + 1):
-            return x
-        return signal.filtfilt(b, a, x)
+    # attempt to pitch modeling as in nnsvs
+    def detect_vibrato_params(self, f0_segment, frame_rate=100, debug=False):
+        if len(f0_segment) < 5 or np.any(np.isnan(f0_segment)):
+            return None
 
-    def compute_extent(self, pitch_seg):
-        peak_high_pos = argrelmax(pitch_seg)[0]
-        peak_low_pos = argrelmin(pitch_seg)[0]
+        detrended = f0_segment - np.mean(f0_segment)
+        if np.allclose(detrended, 0.0):
+            return None
 
-        if len(peak_high_pos) == 1 or len(peak_low_pos) == 1:
-            return np.array([-1])
+        normed = detrended / (np.max(np.abs(detrended)) + 1e-6)
 
-        if len(peak_high_pos) < len(peak_low_pos):
-            peak_low_pos = peak_low_pos[:-2]
-        elif len(peak_high_pos) == len(peak_low_pos):
-            peak_low_pos = peak_low_pos[:-1]
+        fft = np.fft.rfft(normed)
+        freqs = np.fft.rfftfreq(len(normed), d=1 / frame_rate)
+        magnitude = np.abs(fft)
 
-        peak_high_pitch = pitch_seg[peak_high_pos]
-        peak_low_pitch = pitch_seg[peak_low_pos]
+        peak_idx = np.argmax(magnitude[1:]) + 1
+        peak_freq = freqs[peak_idx]
+        peak_mag = magnitude[peak_idx]
 
-        peak_high_pos_diff = np.diff(peak_high_pos)
-        peak_low_pos_diff = np.diff(peak_low_pos)
+        if not (4.0 <= peak_freq <= 12.0):
+            if debug: print(f"rejected: rate {peak_freq:.2f}Hz out of range")
+            return None
 
-        # TODO: would probably be a bug...
-        if len(peak_high_pitch) != len(peak_low_pitch) + 1:
-            return np.array([-1])
+        depth = 2 * np.std(detrended)
+        if depth < 2.0:
+            if debug: print(f"rejected: depth {depth:.2f}Hz too shallow")
+            return None
 
-        E = np.zeros(len(peak_high_pos_diff) + len(peak_low_pos_diff))
-        E[0::2] = (peak_high_pitch[1:] + peak_high_pitch[:-1]) / 2 - peak_low_pitch
-        E[1::2] = peak_high_pitch[1:-1] - (peak_low_pitch[1:] + peak_low_pitch[:-1]) / 2
+        if debug:
+            print(f"vibrato detected: {peak_freq:.2f}Hz rate, {depth:.2f}Hz depth")
 
-        return E
+        return peak_freq, depth
 
-    def nonzero_segments(self, f0):
-        vuv = f0 > 0
-        started = False
-        s, e = 0, 0
-        segments = []
-        for idx in range(len(f0)):
-            if vuv[idx] > 0 and not started:
-                started = True
-                s = idx
-            elif started and (vuv[idx] <= 0):
-                e = idx
-                started = False
-                segments.append((s, e))
-            else:
-                pass
-
-        if started and vuv[-1] > 0:
-            segments.append((s, len(vuv) - 1))
-
-        return segments
-
-    def extract_vibrato_parameters_impl(self, pitch_seg, sr):
-        peak_high_pos = argrelmax(pitch_seg)[0]
-        peak_low_pos = argrelmin(pitch_seg)[0]
-
-        m_a = np.zeros(len(pitch_seg))
-        m_f = np.zeros(len(pitch_seg))
-
-        if len(peak_high_pos) != len(peak_low_pos) + 1:
-            print("Warning! Probably a bug...T.T")
-            print(peak_high_pos, peak_low_pos)
-            return None, None, None, None
-
-        peak_high_pos_diff = np.diff(peak_high_pos)
-        peak_low_pos_diff = np.diff(peak_low_pos)
-
-        R = np.zeros(len(peak_high_pos_diff) + len(peak_low_pos_diff))
-        R[0::2] = peak_high_pos_diff
-        R[1::2] = peak_low_pos_diff
-
-        m_f_ind = np.zeros(len(R), dtype=int)
-        m_f_ind[0::2] = peak_high_pos[:-1]
-        m_f_ind[1::2] = peak_low_pos[:-1]
-        m_f[m_f_ind] = (1 / R) * sr
-
-        peak_high_pitch = pitch_seg[peak_high_pos]
-        peak_low_pitch = pitch_seg[peak_low_pos]
-
-        E = np.zeros(len(R))
-        E[0::2] = (peak_high_pitch[1:] + peak_high_pitch[:-1]) / 2 - peak_low_pitch
-        E[1::2] = peak_high_pitch[1:-1] - (peak_low_pitch[1:] + peak_low_pitch[:-1]) / 2
-
-        m_a_ind = np.zeros(len(R), dtype=int)
-        m_a_ind[0::2] = peak_low_pos
-        m_a_ind[1::2] = peak_high_pos[1:-1]
-        m_a[m_a_ind] = 0.5 * E
-
-        rate = 1 / R.mean() * sr
-        extent = 0.5 * E.mean()
-        print(f"Rate: {rate}, Extent: {extent}")
-
-        return R, E, m_a, m_f
-
-    def extract_smoothed_f0(self, f0, sr, cutoff=8):
-        segments = self.nonzero_segments(f0)
-
-        f0_smooth = f0.copy()
-        for s, e in segments:
-            f0_smooth[s:e] = self.lowpass_filter(f0[s:e], sr, cutoff=cutoff)
-
-        return f0_smooth
-
-    def extract_vibrato_likelihood(self, f0_smooth, sr, win_length=32, n_fft=128, min_freq=3, max_freq=8):
-        # STFT on 1st order diffference of F0
-        X = np.abs(
-            librosa.stft(
-                np.diff(f0_smooth),
-                hop_length=1,
-                win_length=win_length,
-                n_fft=n_fft,
-                window="hann",
-            )
-        )
-        X_norm = X / (X.sum(0) + 1e-7)
-
-        freq_per_bin = sr / n_fft
-        min_freq_bin = int(min_freq / freq_per_bin)
-        max_freq_bin = int(max_freq / freq_per_bin)
-
-        # Compute vibrato likelhiood
-        St = np.abs(np.diff(X_norm, axis=0)).sum(0)
-        Ft = X_norm[min_freq_bin:max_freq_bin, :].sum(0)
-        vibrato_likelihood = St * Ft
-
-        return vibrato_likelihood
-
-    def interp_vibrato(self, m_f):
-        nonzero_indices = np.where(m_f > 0)[0]
-        nonzero_indices = [0] + list(nonzero_indices) + [len(m_f) - 1]
-        out = np.interp(np.arange(len(m_f)), nonzero_indices, m_f[nonzero_indices])
-        return out
-
-    def extract_vibrato_parameters(self, pitch, vibrato_likelihood, sr=100, threshold=0.12,
-        min_cross_count=5, min_extent=30, max_extent=150, interp_params=True, smooth_params=False,
-        smooth_width=15, clip_extent=True):
-
-        T = len(vibrato_likelihood)
-
-        vibrato_flags = np.zeros(T, dtype=int)
-        m_a = np.zeros(T)
-        m_f = np.zeros(T)
-
-        peak_high_pos = argrelmax(pitch)[0]
-        peak_low_pos = argrelmin(pitch)[0]
-
-        # iterate over every peak position
-        peak_high_idx = 0
-        while peak_high_idx < len(peak_high_pos):
-            peak_frame_idx = peak_high_pos[peak_high_idx]
-
-            found = False
-            if vibrato_likelihood[peak_frame_idx] > threshold:
-                # Initial positions for vibrato section
-                start_index = peak_frame_idx
-                peaks = peak_low_pos[peak_low_pos > peak_frame_idx]
-                if len(peaks) > 0:
-                    end_index = peaks[0]
-                else:
-                    peak_high_idx += 1
-                    continue
-                next_start_peak_high_idx = -1
-
-                # Find a peak position that is close to the next non-speech segment
-                # assuming that there's a non-speech segment right after vibrato
-                # NOTE: we may want to remove this constraint
-                peak_high_pos_rest = peak_high_pos[peak_high_pos > peak_frame_idx]
-                for frame_idx in range(end_index, T):
-                    if pitch[frame_idx] <= 0:
-                        peaks = peak_high_pos_rest[peak_high_pos_rest < frame_idx]
-                        if len(peaks) > 0:
-                            end_index = peaks[-1]
-                            next_start_peak_high_idx = (
-                                len(peak_high_pos[peak_high_pos < end_index]) + 1
-                            )
-                        break
-
-                # Set the search width (backward)
-                search_width_backward = 0
-                for frame_idx in range(start_index, 0, -1):
-                    if pitch[frame_idx] <= 0:
-                        peaks_backward = peak_high_pos[
-                            (peak_high_pos < peak_frame_idx) & (peak_high_pos > frame_idx)
-                        ]
-                        if len(peaks_backward) > 0:
-                            backward = peaks_backward[0]
-                            search_width_backward = len(
-                                peak_high_pos[
-                                    (peak_high_pos > backward)
-                                    & (peak_high_pos <= peak_frame_idx)
-                                ]
-                            )
-                        break
-
-                # Find a peak position that satisfies the following vibrato constraints
-                # 1) more than 5 times crossing
-                # 2) 30 ~ 150 cent oscillation
-                estimate_start_index = start_index
-                rate = 0
-                for peak_idx in range(
-                    max(peak_high_idx - search_width_backward, 0), peak_high_idx
-                ):
-                    if peak_high_pos[peak_idx] >= T:
-                        break
-                    f0_seg = pitch[peak_high_pos[peak_idx] : end_index]
-
-                    # Check if the segment satisfies vibrato constraints
-                    m = f0_seg.mean()
-                    cross_count = len(np.where(np.diff(np.sign(f0_seg - m)))[0])
-
-                    # Find the start_index so that the vibrato section has more than 5 crossing
-                    E = self.compute_extent(f0_seg)
-                    extent = 0.5 * E.mean()
-                    having_large_deviation = ((0.5 * E) > max_extent * 2).any()
-                    if (
-                        cross_count >= min_cross_count
-                        and cross_count >= rate
-                        and extent >= min_extent
-                        and extent <= max_extent
-                        and not having_large_deviation
-                        and (E > 0).all()
-                    ):
-                        rate = cross_count
-                        estimate_start_index = peak_high_pos[peak_idx]
-
-                start_index = estimate_start_index
-
-                if rate >= min_cross_count:
-                    R, E, m_a_seg, m_f_seg = self.extract_vibrato_parameters_impl(
-                        pitch[start_index - 1 : end_index + 2], sr
-                    )
-                    if m_a_seg is None:
-                        found = False
-                        break
-                    found = True
-                    vibrato_flags[start_index:end_index] = 1
-
-                    if interp_params:
-                        m_a_seg = self.interp_vibrato(m_a_seg)
-                        m_f_seg = np.clip(self.interp_vibrato(m_f_seg), 3, 8)
-                    if smooth_params:
-                        m_a_seg = np.convolve(
-                            m_a_seg, np.ones(smooth_width) / smooth_width, mode="same"
-                        )
-                        m_f_seg = np.convolve(
-                            m_f_seg, np.ones(smooth_width) / smooth_width, mode="same"
-                        )
-
-                    if clip_extent:
-                        m_a_seg = np.clip(m_a_seg, min_extent, max_extent)
-                    m_a[start_index:end_index] = m_a_seg[1:-2]
-                    m_f[start_index:end_index] = m_f_seg[1:-2]
-
-                    assert next_start_peak_high_idx > peak_high_idx
-                    peak_high_idx = next_start_peak_high_idx
-
-            if not found:
-                peak_high_idx += 1
-
-        return vibrato_flags, m_a, m_f
-
-    def gen_sine_vibrato(self, f0, sr, m_a, m_f, scale=1.0):
-        f0_gen = f0.copy()
-
-        voiced_end_indices = np.asarray([e for _, e in self.nonzero_segments(f0)])
-
-        for s, e in self.nonzero_segments(m_a):
-            # limit vibrato rate to [3, 8] Hz
-            m_f_seg = np.clip(m_f[s:e], 3, 8)
-            # limit vibrato extent to [30, 150] cent
-            m_a_seg = np.clip(m_a[s:e], 30, 150)
-
-            cent = scale * m_a_seg * np.sin(2 * np.pi / sr * m_f_seg * np.arange(0, e - s))
-            new_f0 = f0[s:e] * np.exp(cent * np.log(2) / 1200)
-            f0_gen[s:e] = new_f0
-
-            # NOTE: this is a hack to avoid discontinuity at the end of vibrato
-            voiced_ends_next_to_vibrato = voiced_end_indices[voiced_end_indices > e]
-            if len(voiced_ends_next_to_vibrato) > 0:
-                voiced_end = voiced_ends_next_to_vibrato[0]
-                f0_gen[s:voiced_end] = self.lowpass_filter(f0_gen[s:voiced_end], sr, cutoff=12)
-
-        return f0_gen
-
-    # attempt to pitch modeling as in nnsvs pitch.py
     def apply_pitch_modeling(self, f0_hz: np.ndarray, note_midi: np.ndarray, mel2note: torch.Tensor, mode: str = "default") -> np.ndarray:
         note_hz = librosa.midi_to_hz(note_midi)
         note_hz_tensor = torch.from_numpy(note_hz).to(mel2note.device)
@@ -391,13 +132,17 @@ class VarianceBinarizer(BaseBinarizer):
 
         portamento_margin_b = hparams['portamento_margin_beginning']
         portamento_margin_e = hparams['portamento_margin_end']
-        vibrato_cutoff = hparams['vibrato_smoothing_cutoff']
-        vibrato_scale = hparams['vibrato_scale']
 
-        smoothed_f0 = self.extract_smoothed_f0(f0_hz, sr=100, cutoff=vibrato_cutoff)
-        vibrato_likelihood = self.extract_vibrato_likelihood(smoothed_f0, sr=100)
-        vibrato_flags, m_a, m_f = self.extract_vibrato_parameters(smoothed_f0, vibrato_likelihood, sr=100)
-        vibrato_f0 = self.gen_sine_vibrato(frame_note_hz.copy(), sr=100, m_a=m_a, m_f=m_f, scale=vibrato_scale)
+        frame_rate = 100
+        t = np.arange(len(f0_hz)) / frame_rate
+
+        f0_filled = np.copy(f0_hz)
+        if np.isnan(f0_filled).any():
+            f0_filled = np.interp(
+                np.arange(len(f0_filled)),
+                np.flatnonzero(~np.isnan(f0_filled)),
+                f0_filled[~np.isnan(f0_filled)]
+            )
 
         f0_hz_corrected = np.copy(f0_hz)
         note_ids = mel2note.cpu().numpy()
@@ -410,49 +155,99 @@ class VarianceBinarizer(BaseBinarizer):
             idx = np.where(mask)[0]
             if len(idx) < 2:
                 continue
-    
+
             start, end = idx[0], idx[-1]
             length = end - start + 1
-    
             margin_len_start = max(int(length * portamento_margin_b), 1)
             margin_len_end = max(int(length * portamento_margin_e), 1)
-    
             blend_len = min(4, margin_len_start, margin_len_end)
-    
+
             mid_start = start + margin_len_start
             mid_end = end - margin_len_end + 1
-    
             if mid_end <= mid_start:
                 continue
-    
+
             center_slice = slice(mid_start + blend_len, mid_end - blend_len)
-    
+
             if mode == "default":
                 for i in range(blend_len):
                     alpha = 0.5 * (1 - np.cos(np.pi * (i / blend_len)))
                     idx_blend = mid_start + i
                     if idx_blend <= end:
                         f0_hz_corrected[idx_blend] = (
-                            f0_hz[idx_blend] * (1 - alpha) + vibrato_f0[idx_blend] * alpha
+                            f0_hz[idx_blend] * (1 - alpha) + frame_note_hz[idx_blend] * alpha
                         )
                 for i in range(blend_len):
                     alpha = 0.5 * (1 - np.cos(np.pi * (i / blend_len)))
                     idx_blend = mid_end - 1 - i
                     if idx_blend >= start:
                         f0_hz_corrected[idx_blend] = (
-                            f0_hz[idx_blend] * (1 - alpha) + vibrato_f0[idx_blend] * alpha
+                            f0_hz[idx_blend] * (1 - alpha) + frame_note_hz[idx_blend] * alpha
                         )
-                f0_hz_corrected[center_slice] = vibrato_f0[center_slice]
-    
+
+                vib_regions = []
+                i = mid_start + blend_len
+                while i < mid_end - blend_len:
+                    win_len = 20
+                    half_win = win_len // 2
+                    win_start = max(i - half_win, 0)
+                    win_end = min(i + half_win, len(f0_filled))
+                    f0_window = f0_filled[win_start:win_end]
+
+                    result = self.detect_vibrato_params(f0_window, frame_rate=frame_rate, debug=True)
+                    if result is not None:
+                        vib_start = i
+                        rate, depth = result
+                        while i < mid_end - blend_len:
+                            next_win = f0_filled[max(i - half_win, 0):min(i + half_win, len(f0_filled))]
+                            next_result = self.detect_vibrato_params(next_win, frame_rate=frame_rate, debug=True)
+                            if next_result is None:
+                                break
+                            i += 1
+                        vib_end = i
+                        min_len = int((1 * frame_rate) / rate)
+                        if vib_end - vib_start >= min_len:
+                            vib_regions.append((vib_start, vib_end, rate, depth))
+                    else:
+                        i += 1
+
+                merged = []
+                for start_v, end_v, rate, depth in vib_regions:
+                    if not merged:
+                        merged.append([start_v, end_v, rate, depth])
+                    else:
+                        last = merged[-1]
+                        last[1] = end_v
+                        last[2] = (last[2] + rate) / 2
+                        last[3] = (last[3] + depth) / 2
+
+                for start_v, end_v, rate, depth in merged:
+                    fade_len = min(10, (end_v - start_v) // 2, int(frame_rate / rate))
+                    for i in range(start_v, end_v):
+                        alpha = 1.0
+                        if fade_len > 0:
+                            if i < start_v + fade_len:
+                                alpha = 0.5 * (1 - np.cos(np.pi * (i - start_v) / fade_len))
+                            elif i > end_v - fade_len:
+                                alpha = 0.5 * (1 - np.cos(np.pi * (end_v - i) / fade_len))
+                        phase = 2 * np.pi * rate * t[i]
+                        vibrato = np.sin(phase) * depth * alpha
+                        f0_hz_corrected[i] = frame_note_hz[i] + vibrato
+
+                for i in range(mid_start + blend_len, mid_end - blend_len):
+                    if not any(start <= i < end for start, end, _, _ in merged):
+                        f0_hz_corrected[i] = frame_note_hz[i]
+
+            # letting this rot we hate her
             elif mode == "shift_to_note":
                 original_center = np.mean(f0_hz[center_slice])
                 target_pitch = note_hz[note_id]
                 offset = target_pitch - original_center
                 f0_hz_corrected[center_slice] = f0_hz[center_slice] + offset
-    
+
             else:
                 raise ValueError(f"Unknown pitch modeling mode: {mode}")
-    
+
         return np.nan_to_num(f0_hz_corrected, nan=0.0, posinf=0.0, neginf=0.0)
 
     def load_attr_from_ds(self, ds_id, name, attr, idx=0):
